@@ -73,6 +73,26 @@ def session_file(project: Path, session_id: str) -> Path | None:
     return files[-1] if files else None
 
 
+def _queued(index: int, entry: dict, live: bool) -> list[Message]:
+    """Сообщение, пришедшее, пока модель работала: Claude Code пишет его не репликой,
+    а вложением `queued_command` (заказчик 23.09: ответ, отправленный посреди работы,
+    пропадал из ленты и не находился даже при новом открытии агента)."""
+    attachment = entry.get("attachment") or {}
+    if attachment.get("type") != "queued_command":
+        return []
+    text = str(attachment.get("prompt") or "").strip()
+    channel = CHANNEL.match(text)
+    if channel:
+        task = channel.group(1).strip()
+        return [Message(index, "user", task)] if task and not live else []
+    task = _task_line(text)
+    if task is not None:
+        return [Message(index, "tool", task)]
+    if not text or text.startswith(COMMAND_ECHO):
+        return []
+    return [Message(index, "user", text)]
+
+
 def _tool_line(block: dict) -> str:
     """Вызов инструмента — одной строкой активности: простыни вывода в ленту не тащим."""
     name = str(block.get("name") or "инструмент")
@@ -100,6 +120,8 @@ def messages_from(index: int, entry: dict, live: bool = False) -> list[Message]:
     `live` — запись только что дописана, и плагин шлёт её на лету: задачу с телефона и ответ
     через `reply` он уже отправил сам в момент события — второй раз их не шлём."""
     kind = entry.get("type")
+    if kind == "attachment" and not entry.get("isSidechain"):
+        return _queued(index, entry, live)
     if kind not in ("user", "assistant") or entry.get("isSidechain"):
         return []
     content = (entry.get("message") or {}).get("content")
@@ -224,6 +246,8 @@ def turn_state(entry: dict) -> str | None:
     if entry.get("isSidechain"):
         return None
     if kind == "assistant":
+        return "busy"
+    if kind == "attachment" and (entry.get("attachment") or {}).get("type") == "queued_command":
         return "busy"
     if kind == "user" and not str(_text_of((entry.get("message") or {}).get("content"))).startswith(COMMAND_ECHO):
         return "busy"

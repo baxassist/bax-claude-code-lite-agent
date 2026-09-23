@@ -367,3 +367,15 @@ def test_background_task_keeps_agent_busy(tmp_path):
     write({"type": "system", "subtype": "turn_duration"})
     follower.poll()
     assert follower.state == "ready"
+
+
+def test_message_sent_mid_turn_is_in_history():
+    """Сообщение, пришедшее посреди работы модели, Claude Code пишет вложением
+    `queued_command` — в истории оно есть (заказчик 23.09: пропадало)."""
+    history = channel_module.history
+    prompt = '<channel source="plugin:bax:bax" source="bax" chat_id="1">\nТрогай кластер\n</channel>'
+    entry = {"type": "attachment", "attachment": {"type": "queued_command", "prompt": prompt}}
+    assert [(m.kind, m.text) for m in history.messages_from(5, entry)] == [("user", "Трогай кластер")]
+    assert history.messages_from(5, entry, live=True) == []  # на лету его уже отправил сам плагин
+    typed = {"type": "attachment", "attachment": {"type": "queued_command", "prompt": "из терминала"}}
+    assert [m.text for m in history.messages_from(6, typed, live=True)] == ["из терминала"]
