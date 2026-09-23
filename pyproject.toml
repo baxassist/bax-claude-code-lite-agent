@@ -1,12 +1,14 @@
-# Только для тестов: сам плагин зависимости берёт при запуске (`uv run --with …` в .mcp.json)
+# Только для тестов: сам плагин зависимости берёт при запуске (`uv run --with …` в .mcp.json).
+# Диапазоны — те же, что там: канал опирается на внутренности mcp, и новая мажорная
+# версия могла бы его молча сломать
 [project]
 name = "bax-claude-code-lite-agent"
 version = "0.2.0"
 description = "Claude Code Lite: канал Бакса внутри открытой сессии Claude Code"
 requires-python = ">=3.11"
 dependencies = [
-    "mcp>=1.0",
-    "websockets>=15.0",
+    "mcp>=2.2,<3",
+    "websockets>=15.0,<18",
 ]
 
 [dependency-groups]

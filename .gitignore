@@ -4,3 +4,5 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .DS_Store
+# версии для разработки не фиксируем: плагин их при запуске не читает (uv run --no-project)
+uv.lock
