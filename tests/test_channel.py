@@ -344,3 +344,26 @@ def test_task_notification_is_one_activity_line():
     [message] = history.messages_from(7, {"type": "user", "message": {"content": text}})
     assert message.kind == "tool"
     assert message.text.startswith("⏱ Background command") and "<" not in message.text
+
+
+def test_background_task_keeps_agent_busy(tmp_path):
+    """Ход кончился, а фоновая задача идёт — агент «работает», пока не придёт её конец."""
+    history = channel_module.history
+    file = tmp_path / "s.jsonl"
+    file.write_bytes(b"")
+    follower = history.Follower.at_end(file)
+
+    def write(entry):
+        with file.open("ab") as fh:
+            fh.write(json.dumps(entry, ensure_ascii=False).encode() + b"\n")
+
+    write({"type": "user", "message": {"content": [{"type": "tool_result", "content":
+          "Command running in background with ID: b123. Output is being written to: /tmp/x"}]}})
+    write({"type": "system", "subtype": "turn_duration"})
+    follower.poll()
+    assert follower.turn == "ready" and follower.state == "busy"
+    write({"type": "user", "message": {"content":
+          "<task-notification>\n<task-id>b123</task-id>\n<status>completed</status>\n</task-notification>"}})
+    write({"type": "system", "subtype": "turn_duration"})
+    follower.poll()
+    assert follower.state == "ready"

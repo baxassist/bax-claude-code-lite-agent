@@ -160,7 +160,7 @@ class Channel:
                 await self.send("message", id=message.id, kind=message.kind, text=message.text)
             # состояние — по файлу: ход идёт и после `reply`, и когда задачу дали в терминале.
             # Карточка разрешения без ответа («waiting») важнее — её не перетираем
-            turn = self.follower.turn
+            turn = self.follower.state
             if turn and turn != self.state and not (self.state == "waiting" and self.pending):
                 await self.status(turn)
 

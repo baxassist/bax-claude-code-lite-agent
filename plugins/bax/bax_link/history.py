@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 #: Ответ модели в телефон — вызов этого инструмента; в ленте это обычный ответ
@@ -230,6 +230,46 @@ def turn_state(entry: dict) -> str | None:
     return None
 
 
+#: Фоновые задачи сессии: запуск виден в результате инструмента, конец — уведомлением
+#: `<task-notification>` или результатом остановки. Пока задача идёт, агент «работает»,
+#: даже если ход закончился (заказчик 23.09: ход кончился ожиданием загрузки — в телефоне
+#: «ждёт задачу», хотя задача не доделана)
+TASK_STARTED = re.compile(r"running in background with ID: (\w+)|Monitor started \(task (\w+)")
+TASK_STOPPED = re.compile(r"Successfully stopped task: (\w+)")
+TASK_DONE = re.compile(r"<task-id>(\w+)</task-id>.*?<status>(\w+)</status>", re.S)
+
+
+def _result_texts(content) -> list[str]:
+    """Тексты результатов инструментов из записи человека (`tool_result`)."""
+    found = []
+    for block in content if isinstance(content, list) else []:
+        if not isinstance(block, dict) or block.get("type") != "tool_result":
+            continue
+        inner = block.get("content")
+        if isinstance(inner, str):
+            found.append(inner)
+        elif isinstance(inner, list):
+            found += [str(b.get("text") or "") for b in inner if isinstance(b, dict)]
+    return found
+
+
+def background_changes(entry: dict) -> tuple[set[str], set[str]]:
+    """(запущенные, закончившиеся) фоновые задачи по записи файла."""
+    if entry.get("type") != "user":
+        return set(), set()
+    content = (entry.get("message") or {}).get("content")
+    started, finished = set(), set()
+    for text in _result_texts(content):
+        for match in TASK_STARTED.finditer(text):
+            started.add(match.group(1) or match.group(2))
+        finished |= set(TASK_STOPPED.findall(text))
+    text = content if isinstance(content, str) else _text_of(content)
+    for task_id, status in TASK_DONE.findall(text or ""):
+        if status in TASK_STATUS:
+            finished.add(task_id)
+    return started, finished
+
+
 @dataclass
 class Follower:
     """Слежение за файлом сессии: что дописано с прошлого раза (заказчик 23.09 — новые
@@ -242,6 +282,15 @@ class Follower:
     index: int = 0
     #: busy | ready — по последней записи, которая об этом говорит; None — пока не знаем
     turn: str | None = None
+    #: фоновые задачи, запущенные после начала слежения и ещё не закончившиеся
+    background: set = field(default_factory=set)
+
+    @property
+    def state(self) -> str | None:
+        """Что показать: ход кончился, но фоновая задача идёт — всё ещё «работает»."""
+        if self.turn == "ready" and self.background:
+            return "busy"
+        return self.turn
 
     @classmethod
     def at_end(cls, file: Path | None) -> "Follower":
@@ -277,5 +326,7 @@ class Follower:
                 continue
             found.extend(messages_from(index, entry, live=True))
             self.turn = turn_state(entry) or self.turn
+            started, finished = background_changes(entry)
+            self.background = (self.background | started) - finished
         self.offset += end + 1
         return found
