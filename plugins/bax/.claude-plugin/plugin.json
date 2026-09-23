@@ -1,0 +1,8 @@
+{
+  "name": "bax",
+  "description": "Канал Бакса: задачи с телефона приходят в эту сессию Claude Code, ответы уходят обратно в приложение",
+  "version": "0.2.0",
+  "homepage": "https://github.com/baxassist/bax-claude-code-lite-agent",
+  "repository": "https://github.com/baxassist/bax-claude-code-lite-agent",
+  "keywords": ["bax", "channel", "mcp"]
+}

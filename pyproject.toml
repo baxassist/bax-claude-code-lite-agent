@@ -1,0 +1,27 @@
+# Только для тестов: сам плагин зависимости берёт при запуске (`uv run --with …` в .mcp.json)
+[project]
+name = "bax-claude-code-lite-agent"
+version = "0.2.0"
+description = "Claude Code Lite: канал Бакса внутри открытой сессии Claude Code"
+requires-python = ">=3.11"
+dependencies = [
+    "mcp>=1.0",
+    "websockets>=15.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.25",
+    "ruff>=0.9",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 110
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

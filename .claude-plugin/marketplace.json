@@ -1,0 +1,12 @@
+{
+  "name": "baxassist",
+  "description": "Плагины Бакса для Claude Code",
+  "owner": {"name": "Bax"},
+  "plugins": [
+    {
+      "name": "bax",
+      "description": "Канал Бакса: задачи с телефона приходят в эту сессию Claude Code",
+      "source": "./plugins/bax"
+    }
+  ]
+}
