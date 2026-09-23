@@ -113,6 +113,9 @@ class Channel:
         self.entry = 0                        # номер сообщения в ленте приложения
         self.chat_id = str(uuid.uuid4())
         self.questions: dict[str, str] = {}   # question_id → request_id разрешения
+        #: карточки вопросов без ответа — чтобы показать заново, когда приложение откроют:
+        #: вопрос мог прийти, пока оно было закрыто
+        self.pending: dict[str, dict] = {}
         self.state = "ready"
 
     # --- наружу, в Бакс ------------------------------------------------------
@@ -130,7 +133,10 @@ class Channel:
         return self.entry
 
     async def reply(self, text: str) -> None:
-        """Ответ модели — в приложение. Ход на этом заканчивается."""
+        """Ответ модели — в приложение. Ход на этом заканчивается: вопросы этого хода решены
+        (в терминале или на телефоне), показывать их снова незачем."""
+        self.questions.clear()
+        self.pending.clear()
         await self.send("message", id=self.next_id(), kind="assistant", text=text)
         await self.send("done", id=self.entry)
         await self.status("ready")
@@ -174,7 +180,11 @@ class Channel:
     async def on_frame(self, frame: dict) -> None:
         kind = frame.get("type")
         if kind == "subscribe":
+            # историю (задачи и ответы) приложению отдаёт сервер — он её и хранит; отсюда —
+            # что умеем, вопросы без ответа и состояние
             await self.send("caps", **CAPS)
+            for card in self.pending.values():
+                await self.send("question", **card)
             await self.status(self.state)
         elif kind == "run":
             await self.run(str(frame.get("text") or ""))
@@ -201,6 +211,7 @@ class Channel:
     async def answer(self, frame: dict) -> None:
         question_id = str(frame.get("question_id") or "")
         request_id = self.questions.pop(question_id, "")
+        self.pending.pop(question_id, None)
         if not request_id:
             return await self.send("error", code="not_found", message="Этот вопрос уже закрыт")
         await self.permission(request_id, "allow" if frame.get("verdict") == "allow" else "deny")
@@ -213,8 +224,10 @@ class Channel:
         при этом живые: применяется ответ того, кто ответил первым."""
         question_id = str(uuid.uuid4())
         self.questions[question_id] = request_id
-        await self.send("question", question_id=question_id, kind="permission", tool=tool,
-                        input={"preview": preview}, text=description, options=[], rule="")
+        card = {"question_id": question_id, "kind": "permission", "tool": tool,
+                "input": {"preview": preview}, "text": description, "options": [], "rule": ""}
+        self.pending[question_id] = card
+        await self.send("question", **card)
         await self.status("waiting")
 
 

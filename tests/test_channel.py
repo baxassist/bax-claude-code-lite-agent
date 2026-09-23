@@ -150,3 +150,29 @@ def test_broken_registration_string(tmp_path, monkeypatch):
     monkeypatch.setattr(channel_module, "REGISTRY", tmp_path / "lite.json")
     with pytest.raises(ValueError):
         channel_module.save_registration(tmp_path / "п", "не-строка", "wss://bax.local/agent")
+
+
+async def test_question_is_shown_again_when_the_app_opens(channel):
+    """Вопрос о разрешении пришёл, пока приложение было закрыто, — открыли агента, и карточка
+    снова на экране (23.09). Ответили — больше не показывается."""
+    await channel.ask("req-1", "Bash", "Запустить тесты", "pytest -q")
+    channel.link.frames.clear()
+
+    await channel.on_frame({"type": "subscribe"})
+    again = channel.link.of("question")
+    assert len(again) == 1 and again[0]["tool"] == "Bash" and again[0]["text"] == "Запустить тесты"
+    assert channel.link.of("status")[-1]["state"] == "waiting"
+
+    await channel.answer({"question_id": again[0]["question_id"], "verdict": "allow"})
+    channel.link.frames.clear()
+    await channel.on_frame({"type": "subscribe"})
+    assert channel.link.of("question") == [], "отвеченный вопрос показался снова"
+
+
+async def test_finished_turn_forgets_its_questions(channel):
+    """Ответ модели закрывает ход: вопрос, на который ответили в терминале, не всплывает."""
+    await channel.ask("req-2", "Edit", "Поправить файл", "app.py")
+    await channel.reply("готово")
+    channel.link.frames.clear()
+    await channel.on_frame({"type": "subscribe"})
+    assert channel.link.of("question") == []
