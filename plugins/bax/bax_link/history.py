@@ -26,6 +26,23 @@ REPLY_TOOL = "mcp__plugin_bax_bax__reply"
 CHANNEL = re.compile(r'^<channel\b[^>]*\bsource="bax"[^>]*>\s*(.*?)\s*</channel>\s*$', re.S)
 #: Эхо слэш-команд и вывода локальных команд — не реплики человека
 COMMAND_ECHO = ("<command-", "<local-command-")
+#: Уведомление о фоновой задаче: Claude Code пишет его в сессию от имени человека
+#: (заказчик 23.09: в телефоне оно шло сырым служебным текстом)
+TASK_NOTE = re.compile(r"<task-notification>.*?</task-notification>", re.S)
+TASK_STATUS = {"completed": "завершена", "failed": "упала", "killed": "остановлена", "stopped": "остановлена"}
+
+
+def _task_line(text: str) -> str | None:
+    """Уведомление о фоновой задаче → одна строка активности: что за задача и чем кончилась."""
+    note = TASK_NOTE.search(text)
+    if note is None:
+        return None
+    def tag(name: str) -> str:
+        found = re.search(rf"<{name}>(.*?)</{name}>", note.group(0), re.S)
+        return found.group(1).strip() if found else ""
+    summary = tag("summary") or "фоновая задача"
+    status = TASK_STATUS.get(tag("status"), tag("status"))
+    return f"⏱ {summary}" + (f" — {status}" if status and status not in summary else "")
 
 
 @dataclass(frozen=True)
@@ -96,6 +113,9 @@ def messages_from(index: int, entry: dict, live: bool = False) -> list[Message]:
             # задача с телефона: Claude Code пишет её служебной записью в обёртке канала
             task = channel.group(1).strip()
             return [Message(index, "user", task)] if task and not live else []
+        task = _task_line(text)
+        if task is not None:
+            return [Message(index, "tool", task)]
         if entry.get("isMeta") or text.startswith(COMMAND_ECHO):
             return []  # вставки CLI (навыки, подсказки) и эхо команд — не реплики человека
         return [Message(index, "user", text)]

@@ -332,3 +332,15 @@ def test_turn_state_follows_the_session_file(tmp_path):
         fh.write(json.dumps({"type": "system", "subtype": "turn_duration"}).encode() + b"\n")
     follower.poll()
     assert follower.turn == "ready"
+
+
+def test_task_notification_is_one_activity_line():
+    """Уведомление о фоновой задаче — строкой активности, а не сырым служебным текстом
+    от имени человека (заказчик 23.09)."""
+    history = channel_module.history
+    text = ("<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n"
+            "<summary>Background command \"Install on phone\" completed (exit code 0)</summary>\n"
+            "</task-notification>")
+    [message] = history.messages_from(7, {"type": "user", "message": {"content": text}})
+    assert message.kind == "tool"
+    assert message.text.startswith("⏱ Background command") and "<" not in message.text
