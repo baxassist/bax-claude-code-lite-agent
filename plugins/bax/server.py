@@ -29,7 +29,7 @@ from mcp.server.stdio import stdio_server
 # копируя его папку в свой кэш, и всё, что лежит вне её, туда не попадает
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from bax_link import __version__  # noqa: E402
+from bax_link import __version__, history  # noqa: E402
 from bax_link.connection import HandshakeError, Link  # noqa: E402
 
 logging.basicConfig(stream=sys.stderr, level=logging.INFO,
@@ -48,9 +48,12 @@ REPLY_TOOL = "mcp__plugin_bax_bax__reply"
 #: неработающими. Ни «Стоп», ни смены модели и сессий здесь нет — их некому исполнять
 CAPS = {
     "mode": "lite",
-    "supports": ["subscribe", "run", "answer"],
+    "supports": ["subscribe", "run", "answer", "history"],
     "remember": False,
 }
+
+#: Сколько сообщений истории отдаём при открытии агента и за одно листание вверх
+HISTORY_LIMIT = 10
 
 INSTRUCTIONS = "\n".join([
     "Отправитель читает Бакс на телефоне, а не этот терминал. Всё, что вы хотите ему "
@@ -112,6 +115,9 @@ class Channel:
         self.link: Link | None = None
         self.entry = 0                        # номер сообщения в ленте приложения
         self.chat_id = str(uuid.uuid4())
+        #: id своей сессии: по нему плагин читает историю из её файла (Claude Code передаёт
+        #: его серверам MCP); нет — берётся самый свежий файл проекта
+        self.session_id = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
         self.questions: dict[str, str] = {}   # question_id → request_id разрешения
         #: карточки вопросов без ответа — чтобы показать заново, когда приложение откроют:
         #: вопрос мог прийти, пока оно было закрыто
@@ -128,9 +134,19 @@ class Channel:
         self.state = state
         await self.send("status", state=state)
 
+    def transcript(self) -> Path | None:
+        """Файл сессии Claude Code — источник истории: сервер Бакса её не хранит."""
+        return history.session_file(self.project, self.session_id)
+
     def next_id(self) -> int:
-        self.entry += 1
+        # после истории: номера живых сообщений не меньше номера следующей строки файла,
+        # иначе приложение поставит ответ выше задачи
+        self.entry = max(self.entry + 1, history.next_id(self.transcript()))
         return self.entry
+
+    async def send_history(self, messages: list[history.Message]) -> None:
+        for message in messages:
+            await self.send("message", id=message.id, kind=message.kind, text=message.text)
 
     async def reply(self, text: str) -> None:
         """Ответ модели — в приложение. Ход на этом заканчивается: вопросы этого хода решены
@@ -180,18 +196,23 @@ class Channel:
     async def on_frame(self, frame: dict) -> None:
         kind = frame.get("type")
         if kind == "subscribe":
-            # историю (задачи и ответы) приложению отдаёт сервер — он её и хранит; отсюда —
-            # что умеем, вопросы без ответа и состояние
+            # экран агента открыли: что умеем, история из файла сессии (там и задачи с
+            # телефона, и то, что писали в терминале), вопросы без ответа и состояние
             await self.send("caps", **CAPS)
+            await self.send_history(history.tail(self.transcript(), HISTORY_LIMIT))
             for card in self.pending.values():
                 await self.send("question", **card)
             await self.status(self.state)
+        elif kind == "history":
+            before = int(frame.get("before") or 0)
+            limit = min(int(frame.get("limit") or HISTORY_LIMIT), 50)
+            await self.send_history(history.before(self.transcript(), before, limit))
         elif kind == "run":
             await self.run(str(frame.get("text") or ""))
         elif kind == "answer":
             await self.answer(frame)
         elif kind in ("cancel", "model.set", "effort.set", "settings.set", "session.select",
-                      "session.compact", "sessions.list", "resources.get", "command", "history"):
+                      "session.compact", "sessions.list", "resources.get", "command"):
             # всё это делается управляющими запросами к процессу, которого здесь нет
             await self.send("error", code="unsupported",
                             message="Claude Code Lite этого не умеет: остановка, модель, сессии "

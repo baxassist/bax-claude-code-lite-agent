@@ -57,6 +57,10 @@ class FakeLink:
 @pytest.fixture
 def channel(tmp_path, monkeypatch):
     monkeypatch.setattr(channel_module, "REGISTRY", tmp_path / ".bax" / "lite.json")
+    # ни настоящей сессии, ни настоящих файлов Claude Code: тесты гоняют и из-под Claude Code,
+    # где CLAUDE_CODE_SESSION_ID задан, — иначе плагин читал бы журнал этой самой сессии
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    monkeypatch.setattr(channel_module.history, "projects_root", lambda: tmp_path / "claude-projects")
     made = channel_module.Channel(tmp_path / "проект")
     made.session = FakeSession()
     made.link = FakeLink()
@@ -176,3 +180,79 @@ async def test_finished_turn_forgets_its_questions(channel):
     channel.link.frames.clear()
     await channel.on_frame({"type": "subscribe"})
     assert channel.link.of("question") == []
+
+
+# --- история из файла сессии Claude Code (23.09: сервер её не хранит) -------------------
+
+SESSION = "11112222-3333-4444-5555-666677778888"
+TRANSCRIPT = [
+    {"type": "user", "message": {"content": "сделай ревью"}},
+    {"type": "assistant", "message": {"content": [{"type": "text", "text": "Смотрю код"}]}},
+    {"type": "user", "isMeta": True, "message": {"content": "Base directory for this skill: /x"}},
+    {"type": "user", "isMeta": True, "message": {"content":
+        '<channel source="plugin:bax:bax" source="bax" chat_id="c1">\nсобери проект\n</channel>'}},
+    {"type": "assistant", "message": {"content": [
+        {"type": "thinking", "thinking": "думаю"},
+        {"type": "tool_use", "name": "Bash", "input": {"command": "make"}},
+    ]}},
+    {"type": "user", "message": {"content": [{"type": "tool_result", "content": "ok"}]}},
+    {"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "name": "mcp__plugin_bax_bax__reply", "input": {"chat_id": "c1", "text": "собрал"}},
+    ]}},
+    {"type": "user", "message": {"content": "<command-name>/bax:connect</command-name>"}},
+]
+
+
+@pytest.fixture
+def transcript(channel, tmp_path, monkeypatch):
+    """Файл сессии там, где его пишет Claude Code, плюс недописанная последняя строка."""
+    folder = channel_module.history.projects_root() / str(channel.project).replace("/", "-")
+    folder.mkdir(parents=True)
+    file = folder / f"{SESSION}.jsonl"
+    file.write_text("\n".join(json.dumps(entry, ensure_ascii=False) for entry in TRANSCRIPT)
+                    + '\n{"type": "assistant", "mess', encoding="utf-8")
+    channel.session_id = SESSION
+    return file
+
+
+async def test_history_comes_from_the_session_file(channel, transcript):
+    """Открыли агента — история из файла сессии: задачи с телефона, то, что писали в терминале,
+    ответы через reply. Служебные вставки, эхо команд и вывод инструментов — не реплики."""
+    await channel.on_frame({"type": "subscribe"})
+    shown = [(f["id"], f["kind"], f["text"]) for f in channel.link.of("message")]
+    assert shown == [
+        (0, "user", "сделай ревью"),
+        (1, "assistant", "Смотрю код"),
+        (3, "user", "собери проект"),
+        (4, "thinking", "думаю"),
+        (4, "tool", "Bash: make"),
+        (6, "assistant", "собрал"),
+    ]
+
+
+async def test_history_pages_back(channel, transcript):
+    """Листание вверх — строки раньше `before`, по порядку."""
+    await channel.on_frame({"type": "history", "before": 4, "limit": 2})
+    assert [(f["id"], f["text"]) for f in channel.link.of("message")] == [
+        (1, "Смотрю код"), (3, "собери проект"),
+    ]
+
+
+async def test_live_messages_go_after_the_history(channel, transcript):
+    """Живой ответ нумеруется после строк файла: приложение ставит его ниже истории."""
+    await channel.reply("готово")
+    assert channel.link.of("message")[-1]["id"] >= 9
+
+
+def test_file_is_read_from_the_end(tmp_path):
+    """Номера строк верны с конца файла — с переводом строки в конце и без него."""
+    for text in ("a\nb\nc\n", "a\nb\nc"):
+        file = tmp_path / "f.jsonl"
+        file.write_bytes(text.encode())
+        assert list(channel_module.history._lines_backwards(file, chunk=2)) == [(2, b"c"), (1, b"b"), (0, b"a")]
+        assert channel_module.history.next_id(file) == 3
+
+
+def test_no_session_file_means_no_history(tmp_path, monkeypatch):
+    monkeypatch.setattr(channel_module.history, "projects_root", lambda: tmp_path / "нет")
+    assert channel_module.history.tail(channel_module.history.session_file(tmp_path, "x")) == []
