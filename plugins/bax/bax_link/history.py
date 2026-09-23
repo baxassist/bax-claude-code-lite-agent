@@ -194,6 +194,22 @@ def next_id(file: Path | None) -> int:
     return lines if last in (b"\n", b"") else lines + 1
 
 
+def turn_state(entry: dict) -> str | None:
+    """Идёт ли ход — по записи файла (заказчик 23.09: агент работал, а в телефоне «ждёт
+    задачу»). Конец хода Claude Code отмечает записью `system/turn_duration`; любая запись
+    модели, результат инструмента или реплика человека — ход идёт."""
+    kind = entry.get("type")
+    if kind == "system" and entry.get("subtype") == "turn_duration":
+        return "ready"
+    if entry.get("isSidechain"):
+        return None
+    if kind == "assistant":
+        return "busy"
+    if kind == "user" and not str(_text_of((entry.get("message") or {}).get("content"))).startswith(COMMAND_ECHO):
+        return "busy"
+    return None
+
+
 @dataclass
 class Follower:
     """Слежение за файлом сессии: что дописано с прошлого раза (заказчик 23.09 — новые
@@ -204,6 +220,8 @@ class Follower:
     file: Path | None
     offset: int = 0
     index: int = 0
+    #: busy | ready — по последней записи, которая об этом говорит; None — пока не знаем
+    turn: str | None = None
 
     @classmethod
     def at_end(cls, file: Path | None) -> "Follower":
@@ -238,5 +256,6 @@ class Follower:
             except json.JSONDecodeError:
                 continue
             found.extend(messages_from(index, entry, live=True))
+            self.turn = turn_state(entry) or self.turn
         self.offset += end + 1
         return found

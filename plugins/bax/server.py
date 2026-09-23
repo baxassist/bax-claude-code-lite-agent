@@ -158,6 +158,11 @@ class Channel:
             for message in self.follower.poll():
                 self.entry = max(self.entry, message.id)
                 await self.send("message", id=message.id, kind=message.kind, text=message.text)
+            # состояние — по файлу: ход идёт и после `reply`, и когда задачу дали в терминале.
+            # Карточка разрешения без ответа («waiting») важнее — её не перетираем
+            turn = self.follower.turn
+            if turn and turn != self.state and not (self.state == "waiting" and self.pending):
+                await self.status(turn)
 
     async def send_history(self, messages: list[history.Message]) -> None:
         for message in messages:
@@ -170,7 +175,9 @@ class Channel:
         self.pending.clear()
         await self.send("message", id=self.next_id(), kind="assistant", text=text)
         await self.send("done", id=self.entry)
-        await self.status("ready")
+        # конец хода виден в файле сессии (`follow`); без файла — считаем, что ход кончился
+        if self.transcript() is None:
+            await self.status("ready")
 
     # --- внутрь, в сессию Claude Code ---------------------------------------
 

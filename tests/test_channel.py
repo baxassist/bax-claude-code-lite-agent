@@ -315,3 +315,20 @@ def test_follower_sends_only_what_was_appended(tmp_path):
     assert [(m.id, m.text) for m in follower.poll()] == [(4, "готово")]
     # в истории задача и ответ на месте — они есть в файле
     assert [m.text for m in history.tail(file, 10)] == ["старое", "задача", "делаю", "ответ", "из терминала", "готово"]
+
+
+def test_turn_state_follows_the_session_file(tmp_path):
+    """«Работает» / «ждёт задачу» — по файлу сессии: конец хода — `system/turn_duration`
+    (заказчик 23.09: агент работал, а в телефоне «ждёт задачу»)."""
+    history = channel_module.history
+    file = tmp_path / "s.jsonl"
+    file.write_bytes(b"")
+    follower = history.Follower.at_end(file)
+    with file.open("ab") as fh:
+        fh.write(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "x"}]}}).encode() + b"\n")
+    follower.poll()
+    assert follower.turn == "busy"
+    with file.open("ab") as fh:
+        fh.write(json.dumps({"type": "system", "subtype": "turn_duration"}).encode() + b"\n")
+    follower.poll()
+    assert follower.turn == "ready"
