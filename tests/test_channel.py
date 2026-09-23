@@ -256,3 +256,31 @@ def test_file_is_read_from_the_end(tmp_path):
 def test_no_session_file_means_no_history(tmp_path, monkeypatch):
     monkeypatch.setattr(channel_module.history, "projects_root", lambda: tmp_path / "нет")
     assert channel_module.history.tail(channel_module.history.session_file(tmp_path, "x")) == []
+
+
+# --- на связь — только из сессии с каналом Бакса (23.09) ------------------------------
+
+@pytest.mark.parametrize("args, expected", [
+    ("claude --resume", False),
+    ("claude", False),
+    ("claude --dangerously-load-development-channels plugin:bax@baxassist", True),
+    ("claude --channels plugin:bax@baxassist", True),
+    ("claude --dangerously-load-development-channels=plugin:bax@baxassist", True),
+    ("claude --channels plugin:telegram@official,plugin:bax@baxassist", True),
+    ("claude --dangerously-load-development-channels plugin:other@x", False),
+    ("/Users/me/.local/share/claude/versions/2.1.280 --dangerously-load-development-channels plugin:bax@baxassist", True),
+])
+def test_channel_flag_is_read_from_the_command_line(args, expected):
+    """Плагин загружается в каждую сессию, а выходить на связь должен только там, где Claude
+    Code запущен с каналом Бакса — иначе агента забирала сессия без канала."""
+    assert channel_module.is_claude(args)
+    assert channel_module.launched_with_channel(args) is expected
+
+
+async def test_session_without_channel_does_not_take_the_agent(channel, monkeypatch):
+    """Привязка есть, но сессия без канала — на связь не выходим, агент остаётся свободным."""
+    channel_module.save_registration(channel.project, "a:k:s", "wss://relay.example/agent")
+    monkeypatch.setattr(channel_module, "channel_enabled", lambda: False)
+    channel.link = None
+    await channel_module.connect(channel)
+    assert channel.link is None

@@ -16,6 +16,7 @@ import contextlib
 import json
 import logging
 import os
+import subprocess
 import sys
 import uuid
 from pathlib import Path
@@ -322,6 +323,15 @@ def build(channel: Channel) -> Server:
                     type="text",
                     text="Строка регистрации должна выглядеть как «<id агента>:<id ключа>:<секрет>»",
                 )])
+            if not channel_enabled():
+                # привязка сохранена, но в этой сессии канала нет — задачи сюда не придут
+                return types.CallToolResult(content=[types.TextContent(
+                    type="text",
+                    text=f"Проект {channel.project} привязан к агенту {entry['agent'][:8]}…, но эта "
+                         "сессия запущена без канала Бакса — задачи с телефона сюда не придут. "
+                         "Запустите в этой папке: claude --dangerously-load-development-channels "
+                         "plugin:bax@baxassist",
+                )])
             asyncio.create_task(connect(channel))
             return types.CallToolResult(content=[types.TextContent(
                 type="text",
@@ -343,13 +353,71 @@ def build(channel: Channel) -> Server:
     return server
 
 
+#: Флаги, которыми Claude Code включает канал; значение — `plugin:bax@<маркетплейс>`
+CHANNEL_FLAGS = ("--dangerously-load-development-channels", "--channels")
+
+
+def launched_with_channel(args: str) -> bool:
+    """Командная строка `claude` включает канал Бакса."""
+    words = args.split()
+    for index, word in enumerate(words):
+        flag, _, value = word.partition("=")
+        if flag in CHANNEL_FLAGS:
+            values = value or " ".join(words[index + 1:index + 2])
+            if any(item.startswith("plugin:bax@") for item in values.split(",")):
+                return True
+    return False
+
+
+def is_claude(args: str) -> bool:
+    words = args.split()
+    return bool(words) and (Path(words[0]).name == "claude" or "/claude/versions/" in words[0])
+
+
+def channel_enabled() -> bool:
+    """Запущена ли эта сессия Claude Code с каналом Бакса.
+
+    Плагин ставится для всех сессий и загружается в каждую — в том числе без флага канала,
+    где задачи с телефона до сессии не доходят. Выходить на связь там нельзя: агента забирает
+    та сессия, что подключилась первой, — 23.09 телефон показывал историю чужой сессии без
+    канала. Своему серверу MCP Claude Code не говорит, включён ли канал, поэтому смотрим на
+    командную строку процесса `claude` среди предков. Не удалось — подключаемся, как раньше.
+    """
+    if os.environ.get("BAX_CHANNEL") == "1":
+        return True  # ручной запуск для отладки
+    pid = os.getppid()
+    for _ in range(8):
+        if pid <= 1:
+            return False
+        try:
+            out = subprocess.run(["ps", "-o", "ppid=", "-o", "args=", "-p", str(pid)],
+                                 capture_output=True, text=True, timeout=3).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            return True
+        parent, _, args = out.partition(" ")
+        if not out:
+            return True
+        if is_claude(args):
+            return launched_with_channel(args)
+        try:
+            pid = int(parent)
+        except ValueError:
+            return True
+    return True
+
+
 async def connect(channel: Channel) -> None:
     """Связь с Баксом: рукопожатие тем же ключом и теми же кадрами, что у большого движка.
 
     Агента занимает та сессия, которая подключилась первой. Второй сервер получит
     `agent_busy` и будет ждать, пока первая сессия закроется (README, «Одна сессия на агента»).
+    Сессия без канала Бакса на связь не выходит вовсе — см. `channel_enabled`.
     """
     if channel.link is not None:
+        return
+    if not channel_enabled():
+        logger.info("сессия запущена без канала Бакса — на связь не выходим. Запуск с каналом: "
+                    "claude --dangerously-load-development-channels plugin:bax@baxassist")
         return
     entry = load_registration(channel.project)
     if entry is None:
