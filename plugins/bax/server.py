@@ -184,8 +184,8 @@ class Channel:
                       "session.compact", "sessions.list", "resources.get", "command", "history"):
             # всё это делается управляющими запросами к процессу, которого здесь нет
             await self.send("error", code="unsupported",
-                            message="В этом режиме так нельзя: Claude Code ведёте вы сами "
-                                    "в терминале")
+                            message="Claude Code Lite этого не умеет: остановка, модель, сессии "
+                                    "и ресурсы — в терминале, где открыт Claude Code")
         else:
             await self.send("error", code="unsupported", message=f"кадр {kind!r} здесь не умеют")
 

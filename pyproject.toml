@@ -3,7 +3,7 @@
 # версия могла бы его молча сломать
 [project]
 name = "bax-claude-code-lite-agent"
-version = "0.2.0"
+version = "0.2.1"
 description = "Claude Code Lite: канал Бакса внутри открытой сессии Claude Code"
 requires-python = ">=3.11"
 dependencies = [
