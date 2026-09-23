@@ -1,7 +1,7 @@
 {
   "name": "bax",
   "description": "Канал Бакса: задачи с телефона приходят в эту сессию Claude Code, ответы уходят обратно в приложение",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "author": {
     "name": "Bax",
     "url": "https://github.com/baxassist"

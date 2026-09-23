@@ -284,3 +284,34 @@ async def test_session_without_channel_does_not_take_the_agent(channel, monkeypa
     channel.link = None
     await channel_module.connect(channel)
     assert channel.link is None
+
+
+def test_follower_sends_only_what_was_appended(tmp_path):
+    """Дописанное в файл сессии уходит на телефон сразу (заказчик 23.09: новые сообщения
+    появлялись, только если выйти из агента и зайти). Задачу с телефона и ответ `reply`
+    плагин уже отправил сам — второй раз их нет; недописанная строка ждёт конца."""
+    history = channel_module.history
+    file = tmp_path / "s.jsonl"
+
+    def line(entry: dict) -> bytes:
+        return (json.dumps(entry, ensure_ascii=False) + "\n").encode()
+
+    file.write_bytes(line({"type": "user", "message": {"content": "старое"}}))
+    follower = history.Follower.at_end(file)
+    assert follower.poll() == []
+
+    task = '<channel source="plugin:bax:bax" source="bax" chat_id="1">\nзадача\n</channel>'
+    reply = {"type": "tool_use", "name": history.REPLY_TOOL, "input": {"text": "ответ"}}
+    with file.open("ab") as fh:
+        fh.write(line({"type": "user", "isMeta": True, "message": {"content": task}}))
+        fh.write(line({"type": "assistant", "message": {"content": [{"type": "text", "text": "делаю"}, reply]}}))
+        fh.write(line({"type": "user", "message": {"content": "из терминала"}}))
+        fh.write(b'{"type": "assistant", "mess')  # строка ещё пишется
+    got = follower.poll()
+    assert [(m.id, m.kind, m.text) for m in got] == [(2, "assistant", "делаю"), (3, "user", "из терминала")]
+
+    with file.open("ab") as fh:
+        fh.write(b'age": {"content": [{"type": "text", "text": "\xd0\xb3\xd0\xbe\xd1\x82\xd0\xbe\xd0\xb2\xd0\xbe"}]}}\n')
+    assert [(m.id, m.text) for m in follower.poll()] == [(4, "готово")]
+    # в истории задача и ответ на месте — они есть в файле
+    assert [m.text for m in history.tail(file, 10)] == ["старое", "задача", "делаю", "ответ", "из терминала", "готово"]

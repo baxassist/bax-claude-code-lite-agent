@@ -5,4 +5,4 @@ Claude Code ставит плагин, копируя его папку в св�
 [bax-claude-code-agent](https://github.com/baxassist/bax-claude-code-agent).
 """
 
-__version__ = "0.3.1"
+__version__ = "0.3.2"

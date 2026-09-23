@@ -124,6 +124,8 @@ class Channel:
         #: вопрос мог прийти, пока оно было закрыто
         self.pending: dict[str, dict] = {}
         self.state = "ready"
+        #: что дописано в файл сессии после истории — на телефон сразу, а не при новом открытии
+        self.follower: history.Follower | None = None
 
     # --- наружу, в Бакс ------------------------------------------------------
 
@@ -144,6 +146,18 @@ class Channel:
         # иначе приложение поставит ответ выше задачи
         self.entry = max(self.entry + 1, history.next_id(self.transcript()))
         return self.entry
+
+    async def follow(self, every: float = 1.0) -> None:
+        """Пока есть связь, раз в секунду шлёт дописанное в файл сессии: текст и шаги модели,
+        реплики человека в терминале. Задачи с телефона и ответы `reply` уходят сами."""
+        while True:
+            await asyncio.sleep(every)
+            if self.follower is None or self.follower.file != self.transcript():
+                self.follower = history.Follower.at_end(self.transcript())
+                continue
+            for message in self.follower.poll():
+                self.entry = max(self.entry, message.id)
+                await self.send("message", id=message.id, kind=message.kind, text=message.text)
 
     async def send_history(self, messages: list[history.Message]) -> None:
         for message in messages:
@@ -200,6 +214,8 @@ class Channel:
             # экран агента открыли: что умеем, история из файла сессии (там и задачи с
             # телефона, и то, что писали в терминале), вопросы без ответа и состояние
             await self.send("caps", **CAPS)
+            # слежение — с того места, где кончилась история: без дыр и без повторов
+            self.follower = history.Follower.at_end(self.transcript())
             await self.send_history(history.tail(self.transcript(), HISTORY_LIMIT))
             for card in self.pending.values():
                 await self.send("question", **card)
@@ -429,11 +445,14 @@ async def connect(channel: Channel) -> None:
         path=str(channel.project), session_id=channel.chat_id,
     )
     channel.link = link
+    follower = asyncio.create_task(channel.follow())
     try:
         await link.run(channel.on_ready, channel.on_frame)
     except HandshakeError as error:
         channel.link = None
         logger.error("Бакс не пустил: %s", error.message)
+    finally:
+        follower.cancel()
 
 
 def install_id() -> str:
