@@ -259,13 +259,16 @@ def turn_state(entry: dict) -> str | None:
 #: `<task-notification>` или результатом остановки. Пока задача идёт, агент «работает»,
 #: даже если ход закончился (заказчик 23.09: ход кончился ожиданием загрузки — в телефоне
 #: «ждёт задачу», хотя задача не доделана)
+#: Только в начале результата: так отвечает сам Claude Code о запуске. Та же фраза в выводе
+#: обычной команды (grep по логам, cat файла сессии) — не запуск (24.09: разбор файла сессии
+#: вывел четыре таких фразы, и плагин насчитал четыре «идущие» задачи)
 TASK_STARTED = re.compile(
-    r"running in background with ID: (\w+)"
+    r"\s*(?:Command running in background with ID: (\w+)"
     r"|Monitor started \(task (\w+)"
     # долгая команда, которую Claude Code увёл в фон сам, по таймауту
-    r"|moved to the background \(ID: (\w+)\)"
+    r"|Command did not complete within .*? moved to the background \(ID: (\w+)\)"
     # фоновый агент (инструмент Agent): его конец приходит тем же уведомлением с этим id
-    r"|Async agent launched successfully\..*?agentId: (\w+)",
+    r"|Async agent launched successfully\..*?agentId: (\w+))",
     re.S,
 )
 TASK_STOPPED = re.compile(r"Successfully stopped task: (\w+)")
@@ -293,7 +296,8 @@ def background_changes(entry: dict) -> tuple[set[str], set[str]]:
     content = (entry.get("message") or {}).get("content")
     started, finished = set(), set()
     for text in _result_texts(content):
-        for match in TASK_STARTED.finditer(text):
+        match = TASK_STARTED.match(text)
+        if match:
             started.add(next(group for group in match.groups() if group))
         finished |= set(TASK_STOPPED.findall(text))
     text = content if isinstance(content, str) else _text_of(content)
@@ -348,7 +352,7 @@ class Background:
             if not isinstance(block, dict) or block.get("type") != "tool_result":
                 continue
             for text in _result_texts([block]):
-                for match in TASK_STARTED.finditer(text):
+                for match in filter(None, [TASK_STARTED.match(text)]):
                     task_id = next(group for group in match.groups() if group)
                     self.running[task_id] = {
                         "id": task_id,

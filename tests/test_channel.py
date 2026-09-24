@@ -434,3 +434,15 @@ def test_background_agent_is_a_background_task():
     tracked.observe({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t1", "content": [
         {"type": "text", "text": "Async agent launched successfully. (internal metadata)\nagentId: a1b2c3 (internal ID)"}]}]}})
     assert tracked.running["a1b2c3"]["description"] == "Разобрать логи"
+
+
+def test_phrase_inside_command_output_is_not_a_task():
+    """Фраза о фоновом запуске внутри вывода обычной команды — не запуск (24.09: разбор файла
+    сессии вывёл такие фразы, и плагин насчитал четыре несуществующие задачи)."""
+    history = channel_module.history
+    tracked = history.Background()
+    output = ("329 running in background :: Command running in background with ID: bb5c6yfjr. Output...\n"
+              "19 Monitor started :: Monitor started (task bf0x9zab8, expires in 15m)")
+    tracked.observe({"type": "user", "message": {"content": [
+        {"type": "tool_result", "tool_use_id": "t9", "content": output}]}})
+    assert tracked.running == {}

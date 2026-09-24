@@ -3,7 +3,7 @@
 # поднимает в них настоящий сервер, с которым говорит свой клиент плагина
 [project]
 name = "bax-claude-code-lite-agent"
-version = "0.4.2"
+version = "0.4.3"
 description = "Claude Code Lite: канал Бакса внутри открытой сессии Claude Code"
 requires-python = ">=3.9"
 license = "Apache-2.0"
