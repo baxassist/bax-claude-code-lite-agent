@@ -1,19 +1,17 @@
-# Только для тестов: сам плагин зависимости берёт при запуске (`uv run --with …` в .mcp.json).
-# Диапазоны — те же, что там: канал опирается на внутренности mcp, и новая мажорная
-# версия могла бы его молча сломать
+# Сам плагин сторонних пакетов не использует: запускается системным `python3` (от 3.9, как на Mac
+# с инструментами разработчика) — .mcp.json. Здесь только то, что нужно тестам: websockets
+# поднимает в них настоящий сервер, с которым говорит свой клиент плагина
 [project]
 name = "bax-claude-code-lite-agent"
-version = "0.3.6"
+version = "0.4.0"
 description = "Claude Code Lite: канал Бакса внутри открытой сессии Claude Code"
-requires-python = ">=3.11"
+requires-python = ">=3.9"
 license = "Apache-2.0"
-dependencies = [
-    "mcp==2.2.0",
-    "websockets==17.1",
-]
+dependencies = []
 
 [dependency-groups]
 dev = [
+    "websockets>=13",
     "pytest>=8.3",
     "pytest-asyncio>=0.25",
     "ruff>=0.9",
@@ -25,6 +23,11 @@ testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 110
+target-version = "py39"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# в тестах длинные строки — данные и сообщения проверок, переносить их — хуже читать
+"tests/*" = ["E501"]

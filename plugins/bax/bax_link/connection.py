@@ -12,15 +12,14 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 
-import websockets
-
 from . import protocol
+from . import ws as websocket
 from .protocol import frame, parse
 
 logger = logging.getLogger("bax.link")
 
-# Картинка из приложения приезжает одним кадром: предел websockets по умолчанию (1 МБ)
-# для этого мал, поэтому поднимаем. Файлы обратно уходят кусками по 48 КБ.
+# Картинка из приложения приезжает одним кадром: 1 МБ для этого мал, поэтому 8 МБ.
+# Файлы обратно уходят кусками по 48 КБ.
 MAX_FRAME = 8 * 1024 * 1024
 
 Handler = Callable[[dict], Awaitable[None]]
@@ -71,7 +70,7 @@ class Link:
         self.agent_id = ""
         #: начальные модель и усилие агента — приходят в `ready`, пока их нет
         self.settings: dict = {}
-        self._ws: websockets.ClientConnection | None = None
+        self._ws: websocket.WebSocket | None = None
         self.user: str | None = None
 
     async def send(self, type_: str, **fields) -> None:
@@ -82,10 +81,10 @@ class Link:
             return
         try:
             await ws.send(frame(type_, **fields))
-        except websockets.ConnectionClosed:
+        except websocket.ConnectionClosed:
             logger.debug("кадр %s не ушёл: соединение закрылось", type_)
 
-    async def _handshake(self, ws: websockets.ClientConnection) -> None:
+    async def _handshake(self, ws: websocket.WebSocket) -> None:
         hello = {"key_id": self.key_id, "agent_version": self.agent_version,
                  "engine": self.engine, "install_id": self.install_id,
                  "install_name": self.install_name, "path": self.path}
@@ -112,7 +111,7 @@ class Link:
         self.settings = dict(ready.get("settings") or {})
 
     async def _session(self, on_ready: Handler, on_frame: Handler) -> None:
-        async with websockets.connect(self.url, max_size=MAX_FRAME) as ws:
+        async with await websocket.connect(self.url, max_size=MAX_FRAME) as ws:
             await self._handshake(ws)
             self._ws = ws
             logger.info("на связи: %s", self.url)
@@ -149,7 +148,7 @@ class Link:
                 logger.warning("рукопожатие не вышло: %s", error)
             except asyncio.CancelledError:
                 raise
-            except (OSError, websockets.WebSocketException) as error:
+            except (OSError, websocket.WebSocketError) as error:
                 logger.warning("связи нет (%s)", error)
 
             pause = protocol.backoff(attempt)

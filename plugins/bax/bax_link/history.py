@@ -249,7 +249,8 @@ def turn_state(entry: dict) -> str | None:
         return "busy"
     if kind == "attachment" and (entry.get("attachment") or {}).get("type") == "queued_command":
         return "busy"
-    if kind == "user" and not str(_text_of((entry.get("message") or {}).get("content"))).startswith(COMMAND_ECHO):
+    text = str(_text_of((entry.get("message") or {}).get("content")))
+    if kind == "user" and not text.startswith(COMMAND_ECHO):
         return "busy"
     return None
 
@@ -317,7 +318,7 @@ class Follower:
         return self.turn
 
     @classmethod
-    def at_end(cls, file: Path | None) -> "Follower":
+    def at_end(cls, file: Path | None) -> Follower:
         """Начать с конца файла: то, что уже в нём, приложение получает историей."""
         if file is None or not file.exists():
             return cls(file)

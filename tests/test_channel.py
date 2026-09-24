@@ -26,19 +26,14 @@ def load_module():
 channel_module = load_module()
 
 
-class FakeOutbound:
-    """Куда канал пишет уведомления сессии: тот же вызов, что у настоящего соединения MCP."""
+class FakeSession:
+    """Сторона Claude Code: складываем уведомления, как их отправил бы MCP-сервер плагина."""
 
     def __init__(self) -> None:
         self.sent: list[tuple[str, dict]] = []
 
     async def notify(self, method: str, params: dict) -> None:
         self.sent.append((method, params))
-
-
-class FakeSession:
-    def __init__(self) -> None:
-        self._connection = type("C", (), {"outbound": FakeOutbound()})()
 
 
 class FakeLink:
@@ -72,7 +67,7 @@ async def test_task_from_the_phone_reaches_the_session(channel):
     без единого нажатия в терминале."""
     await channel.on_frame({"type": "run", "text": "почини тест"})
 
-    method, params = channel.session._connection.outbound.sent[0]
+    method, params = channel.session.sent[0]
     assert method == "notifications/claude/channel"
     assert params["content"] == "почини тест"
     assert params["meta"]["source"] == "bax"
@@ -105,7 +100,7 @@ async def test_permission_card_and_answer(channel):
 
     await channel.on_frame({"type": "answer", "question_id": question["question_id"],
                             "verdict": "allow"})
-    method, params = channel.session._connection.outbound.sent[-1]
+    method, params = channel.session.sent[-1]
     assert method == "notifications/claude/channel/permission"
     assert params == {"request_id": "req-1", "behavior": "allow"}
 

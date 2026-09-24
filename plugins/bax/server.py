@@ -22,16 +22,13 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-import mcp.types as types
-from mcp.server.lowlevel import NotificationOptions, Server
-from mcp.server.stdio import stdio_server
-
 # Протокол и соединение — своя копия внутри плагина (`bax_link`): Claude Code ставит плагин,
 # копируя его папку в свой кэш, и всё, что лежит вне её, туда не попадает
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from bax_link import __version__, history  # noqa: E402
 from bax_link.connection import HandshakeError, Link  # noqa: E402
+from bax_link.mcp_stdio import StdioServer  # noqa: E402
 
 logging.basicConfig(stream=sys.stderr, level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -182,15 +179,12 @@ class Channel:
     # --- внутрь, в сессию Claude Code ---------------------------------------
 
     async def push(self, text: str) -> bool:
-        """Задача с телефона — уведомлением канала. Публичного метода для нестандартного
-        уведомления в Python-SDK нет (`send_notification` принимает типизированный союз),
-        поэтому пишем в канал соединения напрямую — то же самое делает `_notify` внутри.
-        **Приватный API**: при обновлении пакета `mcp` проверять это место первым."""
+        """Задача с телефона — уведомлением канала в сессию Claude Code."""
         session = self.session
         if session is None:
             return False
         try:
-            await session._connection.outbound.notify("notifications/claude/channel", {
+            await session.notify("notifications/claude/channel", {
                 "content": text,
                 "meta": {"source": "bax", "chat_id": self.chat_id},
             })
@@ -204,7 +198,7 @@ class Channel:
         if session is None:
             return
         with contextlib.suppress(Exception):
-            await session._connection.outbound.notify(
+            await session.notify(
                 "notifications/claude/channel/permission",
                 {"request_id": request_id, "behavior": behavior},
             )
@@ -276,63 +270,39 @@ class Channel:
         await self.status("waiting")
 
 
-class PermissionParams(types.NotificationParams):
-    """Поля запроса разрешения от Claude Code (research preview, могут поменяться)."""
+TOOLS = [
+    {
+        "name": "reply",
+        "description": "Ответить пользователю в Баксе. Единственный способ доставить "
+                       "ему текст: написанное в терминал он не видит.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"text": {"type": "string"}, "chat_id": {"type": "string"}},
+            "required": ["text"],
+        },
+    },
+    {
+        "name": "connect",
+        "description": "Запомнить строку регистрации Бакса за этим проектом. "
+                       "Вызывается только по команде человека в терминале (/bax:connect).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"registration": {"type": "string"}, "server": {"type": "string"}},
+            "required": ["registration"],
+        },
+    },
+]
 
-    model_config = {"extra": "allow"}
 
-    request_id: str = ""
-    tool_name: str = ""
-    description: str = ""
-    input_preview: str = ""
+def build(channel: Channel) -> StdioServer:
+    """MCP-сервер канала: два инструмента наружу и один обработчик вопросов внутрь.
+    Свой, на стандартной библиотеке (`bax_link.mcp_stdio`): пакет `mcp` требовал `uv`."""
 
-
-def build(channel: Channel) -> Server:
-    """MCP-сервер канала: один инструмент наружу и один обработчик вопросов внутрь."""
-
-    async def on_list_tools(context, params):  # noqa: ANN001, ARG001
-        # первый же запрос CLI даёт нам сессию: наружу низкоуровневый сервер её не отдаёт,
-        # а писать в сессию нужно без запроса — в этом и есть канал
-        if channel.session is None:
-            channel.session = context.session
-            asyncio.create_task(connect(channel))
-        return types.ListToolsResult(tools=[
-            types.Tool(
-                name="reply",
-                description="Ответить пользователю в Баксе. Единственный способ доставить "
-                            "ему текст: написанное в терминал он не видит.",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "text": {"type": "string"},
-                        "chat_id": {"type": "string"},
-                    },
-                    "required": ["text"],
-                },
-            ),
-            types.Tool(
-                name="connect",
-                description="Запомнить строку регистрации Бакса за этим проектом. "
-                            "Вызывается только по команде человека в терминале (/bax:connect).",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "registration": {"type": "string"},
-                        "server": {"type": "string"},
-                    },
-                    "required": ["registration"],
-                },
-            ),
-        ])
-
-    async def on_call_tool(context, params):  # noqa: ANN001, ARG001
-        arguments = params.arguments or {}
-        if params.name == "reply":
+    async def call_tool(name: str, arguments: dict):
+        if name == "reply":
             await channel.reply(str(arguments.get("text") or ""))
-            return types.CallToolResult(
-                content=[types.TextContent(type="text", text="Доставлено в Бакс.")]
-            )
-        if params.name == "connect":
+            return "Доставлено в Бакс.", False
+        if name == "connect":
             try:
                 entry = save_registration(
                     channel.project,
@@ -342,37 +312,33 @@ def build(channel: Channel) -> Server:
                     str(arguments.get("server") or "wss://relay.baxassist.com/agent"),
                 )
             except ValueError:
-                return types.CallToolResult(isError=True, content=[types.TextContent(
-                    type="text",
-                    text="Строка регистрации должна выглядеть как «<id агента>:<id ключа>:<секрет>»",
-                )])
+                return "Строка регистрации должна выглядеть как «<id агента>:<id ключа>:<секрет>»", True
             if not channel_enabled():
                 # привязка сохранена, но в этой сессии канала нет — задачи сюда не придут
-                return types.CallToolResult(content=[types.TextContent(
-                    type="text",
-                    text=f"Проект {channel.project} привязан к агенту {entry['agent'][:8]}…, но эта "
-                         "сессия запущена без канала Бакса — задачи с телефона сюда не придут. "
-                         "Запустите в этой папке: claude --dangerously-load-development-channels "
-                         "plugin:bax@baxassist",
-                )])
-            asyncio.create_task(connect(channel))
-            return types.CallToolResult(content=[types.TextContent(
-                type="text",
-                text=f"Проект {channel.project} привязан к агенту {entry['agent'][:8]}… "
-                     f"Перезапустите сессию с каналом, если Бакс не загорелся.",
-            )])
-        return types.CallToolResult(isError=True, content=[types.TextContent(
-            type="text", text=f"нет инструмента {params.name!r}")])
+                return (f"Проект {channel.project} привязан к агенту {entry['agent'][:8]}…, но эта "
+                        "сессия запущена без канала Бакса — задачи с телефона сюда не придут. "
+                        "Запустите в этой папке: claude --dangerously-load-development-channels "
+                        "plugin:bax@baxassist"), False
+            asyncio.ensure_future(connect(channel))
+            return (f"Проект {channel.project} привязан к агенту {entry['agent'][:8]}… "
+                    "Перезапустите сессию с каналом, если Бакс не загорелся."), False
+        return f"нет инструмента {name!r}", True
 
-    async def on_permission_request(context, params: PermissionParams) -> None:  # noqa: ANN001, ARG001
-        await channel.ask(params.request_id, params.tool_name,
-                          params.description, params.input_preview)
+    async def on_permission_request(params: dict) -> None:
+        # поля запроса разрешения от Claude Code (research preview, могут поменяться)
+        await channel.ask(str(params.get("request_id") or ""), str(params.get("tool_name") or ""),
+                          str(params.get("description") or ""), str(params.get("input_preview") or ""))
 
-    server = Server("bax", version="0.1.0", instructions=INSTRUCTIONS,
-                    on_list_tools=on_list_tools, on_call_tool=on_call_tool)
-    server.add_notification_handler(
-        "notifications/claude/channel/permission_request", PermissionParams, on_permission_request,
-    )
+    server = StdioServer("bax", __version__, INSTRUCTIONS, TOOLS, call_tool,
+                         experimental={"claude/channel": {}, "claude/channel/permission": {}})
+    server.on_notification("notifications/claude/channel/permission_request", on_permission_request)
+    channel.session = server
+
+    async def start() -> None:
+        # клиент готов принимать уведомления — можно выходить на связь с Баксом
+        asyncio.ensure_future(connect(channel))
+
+    server.on_initialized = start
     return server
 
 
@@ -477,13 +443,7 @@ def install_id() -> str:
 
 async def main() -> None:
     channel = Channel(project_dir())
-    server = build(channel)
-    options = server.create_initialization_options(
-        notification_options=NotificationOptions(),
-        experimental_capabilities={"claude/channel": {}, "claude/channel/permission": {}},
-    )
-    async with stdio_server() as (read, write):
-        await server.run(read, write, options)
+    await build(channel).run()
 
 
 if __name__ == "__main__":

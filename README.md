@@ -90,8 +90,8 @@ Lite проще и безопаснее: Claude Code ведёте вы, плаг
   (`~/.claude/projects/<проект>/<сессия>.jsonl`) — это история, которую видит приложение.
 - **Процессы:** смотрит командную строку родительского процесса `claude` — запущен ли он
   с каналом Бакса. Ничего не запускает и команд не выполняет.
-- **Зависимости:** `mcp==2.2.0` и `websockets==17.1`, версии закреплены; ставит их `uv` при
-  первом запуске.
+- **Зависимости:** никаких — только стандартная библиотека Python. Плагин запускается системным
+  `python3` (от 3.9) и ничего не скачивает и не ставит.
 
 ## Что внутри
 
@@ -100,8 +100,10 @@ Lite проще и безопаснее: Claude Code ведёте вы, плаг
 | `.claude-plugin/marketplace.json` | маркетплейс `baxassist` — отсюда `/plugin install bax@baxassist` |
 | `plugins/bax/server.py` | MCP-сервер канала: задачи в сессию, `reply` и разрешения обратно |
 | `plugins/bax/bax_link/` | протокол Бакса, соединение с сервером и история из файла сессии Claude Code |
+| `plugins/bax/bax_link/mcp_stdio.py` | MCP-сервер через stdin/stdout на стандартной библиотеке |
+| `plugins/bax/bax_link/ws.py` | websocket-клиент (RFC 6455) на стандартной библиотеке |
 | `plugins/bax/skills/connect/` | навык `/bax:connect` |
-| `plugins/bax/.mcp.json` | запуск сервера: `uv run` с `mcp` и `websockets` |
+| `plugins/bax/.mcp.json` | запуск сервера: `python3 server.py` |
 
 Протокол и соединение лежат внутри папки плагина намеренно: Claude Code ставит плагин,
 копируя его папку в свой кэш, и всё, что вне неё, туда не попадает.
@@ -109,7 +111,9 @@ Lite проще и безопаснее: Claude Code ведёте вы, плаг
 ## Что нужно
 
 - Claude Code с поддержкой каналов (research preview) и подпиской Claude;
-- [uv](https://docs.astral.sh/uv/) — им запускается сервер канала;
+- `python3` от 3.9 — на Mac он есть вместе с инструментами разработчика (они же дают `git`,
+  которым Claude Code добавляет маркетплейс), на Linux — практически всегда. Больше ничего ставить
+  не нужно: ни `uv`, ни `pip`;
 - аккаунт в Баксе (мобильное приложение).
 
 ## Тесты
@@ -139,5 +143,6 @@ with `claude --dangerously-load-development-channels plugin:bax@baxassist` and r
 
 On your machine the plugin opens one outgoing websocket to the Bax relay, stores registrations
 in `~/.bax/lite.json` (mode 600), reads its own Claude Code session file to show history in the
-app, and runs no commands itself. Dependencies are pinned (`mcp==2.2.0`, `websockets==17.1`).
+app, and runs no commands itself. No third-party dependencies: it runs on the system `python3`
+(3.9+) using only the standard library — nothing to install besides the plugin itself.
 Licensed under the Apache License 2.0.
