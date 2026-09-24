@@ -259,7 +259,12 @@ def turn_state(entry: dict) -> str | None:
 #: `<task-notification>` или результатом остановки. Пока задача идёт, агент «работает»,
 #: даже если ход закончился (заказчик 23.09: ход кончился ожиданием загрузки — в телефоне
 #: «ждёт задачу», хотя задача не доделана)
-TASK_STARTED = re.compile(r"running in background with ID: (\w+)|Monitor started \(task (\w+)")
+TASK_STARTED = re.compile(
+    r"running in background with ID: (\w+)"
+    r"|Monitor started \(task (\w+)"
+    # долгая команда, которую Claude Code увёл в фон сам, по таймауту
+    r"|moved to the background \(ID: (\w+)\)"
+)
 TASK_STOPPED = re.compile(r"Successfully stopped task: (\w+)")
 TASK_DONE = re.compile(r"<task-id>(\w+)</task-id>.*?<status>(\w+)</status>", re.S)
 
@@ -286,13 +291,119 @@ def background_changes(entry: dict) -> tuple[set[str], set[str]]:
     started, finished = set(), set()
     for text in _result_texts(content):
         for match in TASK_STARTED.finditer(text):
-            started.add(match.group(1) or match.group(2))
+            started.add(next(group for group in match.groups() if group))
         finished |= set(TASK_STOPPED.findall(text))
     text = content if isinstance(content, str) else _text_of(content)
     for task_id, status in TASK_DONE.findall(text or ""):
         if status in TASK_STATUS:
             finished.add(task_id)
     return started, finished
+
+
+#: Инструменты, которые запускают фоновую задачу: из их вызова берём, что это за задача
+def _describe_tool(block: dict) -> str:
+    data = block.get("input") if isinstance(block.get("input"), dict) else {}
+    text = data.get("description") or data.get("command") or data.get("prompt") or block.get("name") or ""
+    return " ".join(str(text).split())[:160]
+
+
+def _parse_time(entry: dict) -> float:
+    """Время записи — секунды эпохи; нет — 0."""
+    stamp = str(entry.get("timestamp") or "")
+    if not stamp:
+        return 0.0
+    try:
+        from datetime import datetime  # noqa: PLC0415
+
+        return datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return 0.0
+
+
+@dataclass
+class Background:
+    """Фоновые задачи сессии с подробностями — для кнопки фоновых процессов в приложении
+    (заказчик 24.09): что за задача, когда запущена, чем кончилась."""
+
+    running: dict = field(default_factory=dict)   # id → {id, description, started_at}
+    finished: dict = field(default_factory=dict)  # id → {…, status, finished_at}
+    _calls: dict = field(default_factory=dict)    # id вызова инструмента → описание
+
+    def observe(self, entry: dict) -> bool:
+        """Учесть запись файла. True — список задач поменялся."""
+        changed = False
+        moment = _parse_time(entry)
+        content = (entry.get("message") or {}).get("content")
+        if entry.get("type") == "assistant":
+            for block in content if isinstance(content, list) else []:
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    self._calls[str(block.get("id") or "")] = _describe_tool(block)
+            return False
+        if entry.get("type") not in ("user", "attachment"):
+            return False
+        for block in content if isinstance(content, list) else []:
+            if not isinstance(block, dict) or block.get("type") != "tool_result":
+                continue
+            for text in _result_texts([block]):
+                for match in TASK_STARTED.finditer(text):
+                    task_id = next(group for group in match.groups() if group)
+                    self.running[task_id] = {
+                        "id": task_id,
+                        "description": self._calls.get(str(block.get("tool_use_id") or ""), "") or task_id,
+                        "started_at": moment,
+                    }
+                    changed = True
+        started, finished = background_changes(entry)
+        text = content if isinstance(content, str) else _text_of(content)
+        if entry.get("type") == "attachment":
+            text = str((entry.get("attachment") or {}).get("prompt") or "")
+            finished |= {task_id for task_id, status in TASK_DONE.findall(text) if status in TASK_STATUS}
+        statuses = dict(TASK_DONE.findall(text or ""))
+        for task_id in finished:
+            task = self.running.pop(task_id, None)
+            if task is not None:
+                task.update(status=statuses.get(task_id, "stopped"), finished_at=moment)
+                self.finished[task_id] = task
+                changed = True
+        # закончившиеся — не больше десяти последних
+        for old in list(self.finished)[:-10]:
+            self.finished.pop(old)
+        return changed
+
+    def forget_older_than(self, cutoff: float) -> None:
+        """Задачи, запущенные давно и без конца в файле, — скорее всего, умерли с прошлой
+        сессией: при подключении их не считаем идущими."""
+        for task_id, task in list(self.running.items()):
+            if task["started_at"] and task["started_at"] < cutoff:
+                self.running.pop(task_id)
+
+    def frame(self) -> list:
+        tasks = [dict(task, status="running") for task in self.running.values()]
+        return tasks + list(self.finished.values())
+
+
+def scan_background(file: Path | None, since: float, window: int = 4 << 20) -> Background:
+    """Фоновые задачи из последних `window` байт файла — чтобы при подключении плагин знал
+    и о задачах, запущенных до него (заказчик 24.09: агент с идущей задачей был «ждёт задачу»)."""
+    tracked = Background()
+    if file is None or not file.exists():
+        return tracked
+    with file.open("rb") as fh:
+        size = fh.seek(0, 2)
+        fh.seek(max(0, size - window))
+        chunk = fh.read()
+    lines = chunk.split(b"\n")
+    if size > window:
+        lines = lines[1:]  # первая строка обрезана посередине
+    for raw in lines:
+        try:
+            entry = json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(entry, dict):
+            tracked.observe(entry)
+    tracked.forget_older_than(since)
+    return tracked
 
 
 @dataclass
@@ -307,13 +418,20 @@ class Follower:
     index: int = 0
     #: busy | ready — по последней записи, которая об этом говорит; None — пока не знаем
     turn: str | None = None
-    #: фоновые задачи, запущенные после начала слежения и ещё не закончившиеся
-    background: set = field(default_factory=set)
+    #: фоновые задачи сессии: идущие и недавно закончившиеся
+    tasks: Background = field(default_factory=Background)
+    #: список задач поменялся с прошлого раза — приложению стоит прислать его заново
+    tasks_changed: bool = False
+
+    @property
+    def background(self) -> dict:
+        """Идущие фоновые задачи."""
+        return self.tasks.running
 
     @property
     def state(self) -> str | None:
         """Что показать: ход кончился, но фоновая задача идёт — всё ещё «работает»."""
-        if self.turn == "ready" and self.background:
+        if self.turn == "ready" and self.tasks.running:
             return "busy"
         return self.turn
 
@@ -351,7 +469,7 @@ class Follower:
                 continue
             found.extend(messages_from(index, entry, live=True))
             self.turn = turn_state(entry) or self.turn
-            started, finished = background_changes(entry)
-            self.background = (self.background | started) - finished
+            if self.tasks.observe(entry):
+                self.tasks_changed = True
         self.offset += end + 1
         return found

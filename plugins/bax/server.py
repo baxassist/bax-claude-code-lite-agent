@@ -18,6 +18,7 @@ import logging
 import os
 import subprocess
 import sys
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -46,7 +47,7 @@ REPLY_TOOL = "mcp__plugin_bax_bax__reply"
 #: неработающими. Ни «Стоп», ни смены модели и сессий здесь нет — их некому исполнять
 CAPS = {
     "mode": "lite",
-    "supports": ["subscribe", "run", "answer", "history"],
+    "supports": ["subscribe", "run", "answer", "history", "background.stop"],
     "remember": False,
 }
 
@@ -150,7 +151,7 @@ class Channel:
         while True:
             await asyncio.sleep(every)
             if self.follower is None or self.follower.file != self.transcript():
-                self.follower = history.Follower.at_end(self.transcript())
+                self.follower = self.fresh_follower()
                 continue
             for message in self.follower.poll():
                 self.entry = max(self.entry, message.id)
@@ -160,6 +161,26 @@ class Channel:
             turn = self.follower.state
             if turn and turn != self.state and not (self.state == "waiting" and self.pending):
                 await self.status(turn)
+            if self.follower.tasks_changed:
+                self.follower.tasks_changed = False
+                await self.send_background()
+
+    def fresh_follower(self) -> history.Follower:
+        """Слежение с конца файла, но фоновые задачи — не с нуля (заказчик 24.09: при идущей
+        задаче агент был «ждёт задачу»): прежние, если слежение уже было, иначе — из хвоста
+        файла за последние сутки (задачи старше, скорее всего, умерли с прошлой сессией)."""
+        previous = self.follower
+        fresh = history.Follower.at_end(self.transcript())
+        if previous is not None and previous.file == fresh.file:
+            fresh.tasks, fresh.turn = previous.tasks, previous.turn
+        else:
+            fresh.tasks = history.scan_background(self.transcript(), time.time() - 24 * 3600)
+        return fresh
+
+    async def send_background(self) -> None:
+        """Фоновые задачи — приложению: кнопка у заголовка агента и экран с подробностями."""
+        tasks = self.follower.tasks.frame() if self.follower else []
+        await self.send("background", tasks=tasks)
 
     async def send_history(self, messages: list[history.Message]) -> None:
         for message in messages:
@@ -216,10 +237,14 @@ class Channel:
             # телефона, и то, что писали в терминале), вопросы без ответа и состояние
             await self.send("caps", **CAPS)
             # слежение — с того места, где кончилась история: без дыр и без повторов
-            self.follower = history.Follower.at_end(self.transcript())
+            self.follower = self.fresh_follower()
             await self.send_history(history.tail(self.transcript(), HISTORY_LIMIT))
             for card in self.pending.values():
                 await self.send("question", **card)
+            await self.send_background()
+            turn = self.follower.state
+            if turn and not (self.state == "waiting" and self.pending):
+                self.state = turn
             await self.status(self.state)
         elif kind == "history":
             before = int(frame.get("before") or 0)
@@ -227,6 +252,8 @@ class Channel:
             await self.send_history(history.before(self.transcript(), before, limit))
         elif kind == "run":
             await self.run(str(frame.get("text") or ""))
+        elif kind == "background.stop":
+            await self.stop_background(str(frame.get("task_id") or ""))
         elif kind == "answer":
             await self.answer(frame)
         elif kind in ("cancel", "model.set", "effort.set", "settings.set", "session.select",
@@ -241,6 +268,21 @@ class Channel:
     async def run(self, text: str) -> None:
         if not text.strip():
             return await self.send("error", code="internal", message="пустая задача")
+        await self.send("message", id=self.next_id(), kind="user", text=text)
+        if not await self.push(text):
+            return await self.send("error", code="agent_offline",
+                                   message="Сессия Claude Code закрылась — откройте её снова")
+        await self.status("busy")
+
+    async def stop_background(self, task_id: str) -> None:
+        """«Остановить» у фоновой задачи в приложении. Снаружи задачу не остановить — у Claude
+        Code нет такой ручки, — поэтому просим саму сессию, как если бы человек написал это в
+        терминале: она остановит задачу своим инструментом."""
+        task = self.follower.tasks.running.get(task_id) if self.follower else None
+        if task is None:
+            return await self.send("error", code="internal", message="Эта фоновая задача уже закончилась")
+        text = (f"Остановите, пожалуйста, фоновую задачу {task_id} («{task['description']}»). "
+                "Просьба из приложения Бакс.")
         await self.send("message", id=self.next_id(), kind="user", text=text)
         if not await self.push(text):
             return await self.send("error", code="agent_offline",

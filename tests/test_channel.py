@@ -374,3 +374,51 @@ def test_message_sent_mid_turn_is_in_history():
     assert history.messages_from(5, entry, live=True) == []  # на лету его уже отправил сам плагин
     typed = {"type": "attachment", "attachment": {"type": "queued_command", "prompt": "из терминала"}}
     assert [m.text for m in history.messages_from(6, typed, live=True)] == ["из терминала"]
+
+
+def test_background_tasks_with_details_survive_and_are_found_at_start(tmp_path):
+    """Кнопка фоновых процессов (заказчик 24.09): задача с описанием из вызова инструмента,
+    найдена и при подключении — если запущена до плагина, — а старая и незаконченная не
+    считается идущей (умерла с прошлой сессией)."""
+    import time as clock
+    from datetime import datetime, timezone
+
+    history = channel_module.history
+    file = tmp_path / "s.jsonl"
+
+    def stamp(seconds_ago):
+        return datetime.fromtimestamp(clock.time() - seconds_ago, tz=timezone.utc).isoformat()
+
+    def started(task_id, call, description, seconds_ago):
+        return [
+            {"type": "assistant", "timestamp": stamp(seconds_ago), "message": {"content": [
+                {"type": "tool_use", "id": call, "name": "Bash",
+                 "input": {"command": "sleep 100", "description": description, "run_in_background": True}}]}},
+            {"type": "user", "timestamp": stamp(seconds_ago), "message": {"content": [
+                {"type": "tool_result", "tool_use_id": call,
+                 "content": f"Command running in background with ID: {task_id}. Output is being written to: /tmp/x"}]}},
+        ]
+
+    lines = started("old1", "c1", "давняя", 3 * 24 * 3600) + started("b77", "c2", "Прогон UI-тестов", 60)
+    file.write_text("\n".join(json.dumps(e, ensure_ascii=False) for e in lines) + "\n", encoding="utf-8")
+
+    tracked = history.scan_background(file, clock.time() - 24 * 3600)
+    assert list(tracked.running) == ["b77"]
+    assert tracked.running["b77"]["description"] == "Прогон UI-тестов"
+
+    finished = {"type": "attachment", "attachment": {"type": "queued_command", "prompt":
+                "<task-notification>\n<task-id>b77</task-id>\n<status>completed</status>\n</task-notification>"}}
+    assert tracked.observe(finished) is True
+    assert tracked.running == {} and tracked.finished["b77"]["status"] == "completed"
+    assert tracked.frame()[0]["id"] == "b77"
+
+
+async def test_stop_background_asks_the_session(channel):
+    """«Остановить» из приложения — просьбой в сессию: снаружи задачу не остановить."""
+    history = channel_module.history
+    channel.follower = history.Follower(None)
+    channel.follower.tasks.running["b9"] = {"id": "b9", "description": "Сборка", "started_at": 0}
+    await channel.on_frame({"type": "background.stop", "task_id": "b9"})
+    method, params = channel.session.sent[-1]
+    assert method == "notifications/claude/channel"
+    assert "b9" in params["content"] and "Сборка" in params["content"]
