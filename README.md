@@ -81,6 +81,18 @@ Lite проще и безопаснее: Claude Code ведёте вы, плаг
 - Строку регистрации можно в любой момент перевыпустить в приложении — прежняя перестанет
   работать сразу.
 
+## Что плагин делает на вашей машине
+
+- **Сеть:** одно исходящее websocket-соединение с релеем Бакса (`wss://relay.baxassist.com/agent`
+  или адрес из `/bax:connect`). Других адресов нет; входящих соединений плагин не открывает.
+- **Файлы:** пишет только `~/.bax/lite.json` (регистрации, права 600) и `~/.bax/install`
+  (id установки). Читает файл своей сессии Claude Code
+  (`~/.claude/projects/<проект>/<сессия>.jsonl`) — это история, которую видит приложение.
+- **Процессы:** смотрит командную строку родительского процесса `claude` — запущен ли он
+  с каналом Бакса. Ничего не запускает и команд не выполняет.
+- **Зависимости:** `mcp==2.2.0` и `websockets==17.1`, версии закреплены; ставит их `uv` при
+  первом запуске.
+
 ## Что внутри
 
 | Файл | За что отвечает |
@@ -109,3 +121,23 @@ uv run pytest
 
 Настоящий Claude Code в тестах не нужен: сессия и связь с Баксом подменяются, а проверяется
 путь задачи с телефона в сессию и ответа обратно.
+
+## Лицензия
+
+[Apache License 2.0](LICENSE).
+
+---
+
+## In English
+
+**Bax Claude Code Lite** is a Claude Code plugin that turns an open Claude Code session into
+an agent of the Bax iPhone assistant: tasks sent from the phone arrive in the session through
+a channel, and the replies go back to the app. Install: `/plugin marketplace add
+baxassist/bax-claude-code-lite-agent`, then `/plugin install bax@baxassist`; start the session
+with `claude --dangerously-load-development-channels plugin:bax@baxassist` and run the
+`/bax:connect` command shown in the app.
+
+On your machine the plugin opens one outgoing websocket to the Bax relay, stores registrations
+in `~/.bax/lite.json` (mode 600), reads its own Claude Code session file to show history in the
+app, and runs no commands itself. Dependencies are pinned (`mcp==2.2.0`, `websockets==17.1`).
+Licensed under the Apache License 2.0.

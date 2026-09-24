@@ -3,12 +3,13 @@
 # версия могла бы его молча сломать
 [project]
 name = "bax-claude-code-lite-agent"
-version = "0.3.1"
+version = "0.3.6"
 description = "Claude Code Lite: канал Бакса внутри открытой сессии Claude Code"
 requires-python = ">=3.11"
+license = "Apache-2.0"
 dependencies = [
-    "mcp>=2.2,<3",
-    "websockets>=15.0,<18",
+    "mcp==2.2.0",
+    "websockets==17.1",
 ]
 
 [dependency-groups]
