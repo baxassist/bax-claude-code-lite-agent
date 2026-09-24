@@ -422,3 +422,15 @@ async def test_stop_background_asks_the_session(channel):
     method, params = channel.session.sent[-1]
     assert method == "notifications/claude/channel"
     assert "b9" in params["content"] and "Сборка" in params["content"]
+
+
+def test_background_agent_is_a_background_task():
+    """Фоновый агент (инструмент Agent) — тоже фоновая задача (заказчик 24.09: запущены агенты,
+    а в приложении «фоновых процессов нет»)."""
+    history = channel_module.history
+    tracked = history.Background()
+    tracked.observe({"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "id": "t1", "name": "Agent", "input": {"description": "Разобрать логи"}}]}})
+    tracked.observe({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t1", "content": [
+        {"type": "text", "text": "Async agent launched successfully. (internal metadata)\nagentId: a1b2c3 (internal ID)"}]}]}})
+    assert tracked.running["a1b2c3"]["description"] == "Разобрать логи"

@@ -264,6 +264,9 @@ TASK_STARTED = re.compile(
     r"|Monitor started \(task (\w+)"
     # долгая команда, которую Claude Code увёл в фон сам, по таймауту
     r"|moved to the background \(ID: (\w+)\)"
+    # фоновый агент (инструмент Agent): его конец приходит тем же уведомлением с этим id
+    r"|Async agent launched successfully\..*?agentId: (\w+)",
+    re.S,
 )
 TASK_STOPPED = re.compile(r"Successfully stopped task: (\w+)")
 TASK_DONE = re.compile(r"<task-id>(\w+)</task-id>.*?<status>(\w+)</status>", re.S)
@@ -382,8 +385,9 @@ class Background:
         return tasks + list(self.finished.values())
 
 
-def scan_background(file: Path | None, since: float, window: int = 4 << 20) -> Background:
-    """Фоновые задачи из последних `window` байт файла — чтобы при подключении плагин знал
+def scan_background(file: Path | None, since: float, window: int = 16 << 20) -> Background:
+    """Фоновые задачи из последних `window` байт файла (16 МБ: у долгой сессии с большим
+    выводом 4 МБ — это последние полчаса) — чтобы при подключении плагин знал
     и о задачах, запущенных до него (заказчик 24.09: агент с идущей задачей был «ждёт задачу»)."""
     tracked = Background()
     if file is None or not file.exists():
