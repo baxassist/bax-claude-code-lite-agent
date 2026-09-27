@@ -267,6 +267,9 @@ TASK_STARTED = re.compile(
     r"|Monitor started \(task (\w+)"
     # долгая команда, которую Claude Code увёл в фон сам, по таймауту
     r"|Command did not complete within .*? moved to the background \(ID: (\w+)\)"
+    # или потому, что посреди неё пришло сообщение человека (27.09: в терминале две фоновые
+    # задачи, в приложении — одна)
+    r"|Command was moved to the background \(ID: (\w+)\)"
     # фоновый агент (инструмент Agent): его конец приходит тем же уведомлением с этим id
     r"|Async agent launched successfully\..*?agentId: (\w+))",
     re.S,

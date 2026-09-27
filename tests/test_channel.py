@@ -413,6 +413,18 @@ def test_background_tasks_with_details_survive_and_are_found_at_start(tmp_path):
     assert tracked.frame()[0]["id"] == "b77"
 
 
+def test_command_moved_to_background_by_a_message_is_a_task():
+    """Команду, посреди которой пришло сообщение человека, Claude Code уводит в фон сам — это
+    тоже фоновая задача (27.09: в терминале две фоновые задачи, в приложении одна)."""
+    history = channel_module.history
+    entry = {"type": "user", "message": {"content": [
+        {"type": "tool_result", "tool_use_id": "c1",
+         "content": "Command was moved to the background (ID: bsl1h7pyw) so that a message that arrived "
+                    "while it was running can reach you; it was not interrupted. Output is being written "
+                    "to: /tmp/x"}]}}
+    assert history.background_changes(entry) == ({"bsl1h7pyw"}, set())
+
+
 async def test_stop_background_asks_the_session(channel):
     """«Остановить» из приложения — просьбой в сессию: снаружи задачу не остановить."""
     history = channel_module.history
