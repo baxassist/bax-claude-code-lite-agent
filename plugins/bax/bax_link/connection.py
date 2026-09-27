@@ -1,7 +1,7 @@
 """Связь с сервером Бакса: рукопожатие, кадры, переподключение.
 
 Обрыв связи — обычное дело (ноутбук закрыли, вайфай моргнул), поэтому соединение
-восстанавливается само с нарастающей паузой.
+восстанавливается само с нарастающей паузой, а после сна компьютера — сразу.
 
 Копия соединения движка bax-claude-code-agent: рукопожатие и кадры у Lite ровно те же.
 """
@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Awaitable, Callable
 
 from . import protocol
@@ -32,6 +33,16 @@ FATAL = ("unauthorized", "key_claimed", "wrong_engine", "unsupported_version")
 #: «агента уже занял кто-то другой» — не приговор: у Claude Code Lite это вторая сессия
 #: в том же проекте. Закроют её — подключимся сами, поэтому ждём и пробуем снова
 BUSY = "agent_busy"
+
+#: раз в столько секунд сторож смотрит на соединение
+WATCH_EVERY = 5
+#: столько секунд без единого кадра от сервера — соединение мёртвое: релей шлёт ping
+#: раз в 20 секунд, то есть это три пропущенных подряд
+SILENCE_LIMIT = 60
+#: часы на стене ушли вперёд настолько больше ожидаемого — процесс стоял, компьютер спал
+SLEEP_GAP = 15
+#: почему сторож оборвал соединение: после сна подключаемся сразу, без паузы
+SLEPT = "компьютер спал"
 
 
 class HandshakeError(Exception):
@@ -72,6 +83,8 @@ class Link:
         self.settings: dict = {}
         self._ws: websocket.WebSocket | None = None
         self.user: str | None = None
+        #: почему соединение оборвал сторож; пусто — не он
+        self.dropped = ""
 
     async def send(self, type_: str, **fields) -> None:
         """Кадр серверу. Соединения нет — молча пропускаем: телефон переспросит сам."""
@@ -110,12 +123,36 @@ class Link:
         #: начальные модель и усилие агента — со слов сервера
         self.settings = dict(ready.get("settings") or {})
 
+    async def _watch(self, ws: websocket.WebSocket) -> None:
+        """Сторож: рвёт соединение, если компьютер спал или сервер давно молчит.
+
+        Свой клиент (0.4.0) сам ping не шлёт, а мёртвое соединение по сокету не видно.
+        Mac уснул, релей закрыл соединение, пока он спал, — а плагин после пробуждения
+        ждал кадров из сокета, которого на той стороне уже нет: агент был «не в сети»
+        при открытом Маке (27.09). Прежняя библиотека websockets ловила это своим ping.
+        """
+        last = time.time()
+        while True:
+            await asyncio.sleep(WATCH_EVERY)
+            now = time.time()
+            if now - last > WATCH_EVERY + SLEEP_GAP:
+                self.dropped = SLEPT
+            elif now - ws.last_frame > SILENCE_LIMIT:
+                self.dropped = f"сервер молчит дольше {SILENCE_LIMIT} с"
+            last = now
+            if self.dropped:
+                logger.info("рву соединение: %s", self.dropped)
+                ws.abort()
+                return
+
     async def _session(self, on_ready: Handler, on_frame: Handler) -> None:
         async with await websocket.connect(self.url, max_size=MAX_FRAME) as ws:
-            await self._handshake(ws)
-            self._ws = ws
-            logger.info("на связи: %s", self.url)
+            # сторож — с первой секунды: на мёртвом соединении зависает и само рукопожатие
+            watchdog = asyncio.create_task(self._watch(ws))
             try:
+                await self._handshake(ws)
+                self._ws = ws
+                logger.info("на связи: %s", self.url)
                 await on_ready({"type": "ready", "user": self.user, "settings": self.settings})
                 async for message in ws:
                     try:
@@ -132,15 +169,35 @@ class Link:
                     await on_frame(incoming)
             finally:
                 self._ws = None
+                watchdog.cancel()
+
+    async def _pause(self, seconds: float) -> bool:
+        """Пауза перед переподключением — по часам на стене. True — за паузу компьютер спал.
+
+        Таймеры asyncio идут по монотонным часам, а у системного python3 на Mac они во сне
+        стоят (mach_absolute_time): пять минут паузы, начатые перед сном, после пробуждения
+        тянулись бы ещё пять минут, и всё это время агент был бы «не в сети».
+        """
+        deadline = time.time() + seconds
+        while True:
+            left = deadline - time.time()
+            if left <= 0:
+                return False
+            step = min(WATCH_EVERY, left)
+            before = time.time()
+            await asyncio.sleep(step)  # остановили агента — отмена уходит наружу, не глушим
+            if time.time() - before > step + SLEEP_GAP:
+                return True
 
     async def run(self, on_ready: Handler, on_frame: Handler) -> None:
         """Держит связь, пока агента не остановят. Возвращается только при фатальной ошибке ключа."""
         attempt = 0
         while True:
+            self.dropped = ""
             try:
                 await self._session(on_ready, on_frame)
                 attempt = 0  # соединение жило — считаем паузы заново
-                logger.info("сервер закрыл соединение")
+                logger.info("соединение закрыто: %s", self.dropped or "его закрыл сервер")
             except HandshakeError as error:
                 if error.fatal:
                     logger.error("агент %s остановлен: %s", self.agent_id or self.key_id[:8], error)
@@ -149,9 +206,15 @@ class Link:
             except asyncio.CancelledError:
                 raise
             except (OSError, websocket.WebSocketError) as error:
-                logger.warning("связи нет (%s)", error)
+                logger.warning("связи нет (%s)", self.dropped or error)
 
+            if self.dropped == SLEPT:
+                # после сна — сразу: не поднялась ещё сеть — дальше пойдут обычные паузы
+                attempt = 0
+                continue
             pause = protocol.backoff(attempt)
             attempt += 1
             logger.info("переподключение через %s с", pause)
-            await asyncio.sleep(pause)  # остановили агента — отмена уходит наружу, не глушим
+            if await self._pause(pause):
+                logger.info("компьютер спал — переподключаюсь сейчас")
+                attempt = 0  # прежние неудачи — про сеть до сна

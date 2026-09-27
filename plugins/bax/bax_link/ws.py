@@ -14,6 +14,7 @@ import hashlib
 import os
 import ssl
 import struct
+import time
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -75,6 +76,9 @@ class WebSocket:
         self._max_size = max_size
         self._closed = False
         self._lock = asyncio.Lock()
+        #: когда пришёл последний кадр, любой, включая ping, — по часам на стене:
+        #: по этой метке сторож `Link` видит, что сервер замолчал
+        self.last_frame = time.time()
 
     # --- отправка ------------------------------------------------------------
 
@@ -121,6 +125,7 @@ class WebSocket:
         except (asyncio.IncompleteReadError, ConnectionError, OSError) as error:
             self._closed = True
             raise ConnectionClosed("соединение оборвалось") from error
+        self.last_frame = time.time()
         if mask:
             payload = _mask(payload, mask)
         return bool(first & 0x80), first & 0x0F, payload
@@ -159,6 +164,12 @@ class WebSocket:
             raise StopAsyncIteration from None
 
     # --- закрытие ------------------------------------------------------------
+
+    def abort(self) -> None:
+        """Оборвать сразу, без закрывающего кадра: соединение мёртвое (компьютер спал, сеть
+        сменилась), и ответа ждать не от кого. Ждущий `recv` тут же получит ConnectionClosed."""
+        self._closed = True
+        self._writer.transport.abort()
 
     async def close(self) -> None:
         if not self._closed:

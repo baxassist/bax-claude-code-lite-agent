@@ -73,6 +73,14 @@ Lite проще и безопаснее: Claude Code ведёте вы, плаг
 «агент занят» и подключится сама, когда первая закроется. Закрыли терминал — агент в приложении
 «не на связи».
 
+## Когда Mac спит
+
+Пока Mac спит, плагин стоит, и агент в приложении «не на связи». Проснулся — плагин
+подключается сам, за несколько секунд. Заблокированный экран — ещё не сон, но через минуту
+после того, как погаснет дисплей, Mac обычно засыпает. Чтобы агент оставался на связи
+с заблокированным экраном, запретите сон при питании от адаптера: «Системные настройки →
+Аккумулятор → Параметры…» или `sudo pmset -c sleep 0`. С закрытой крышкой Mac уснёт всё равно.
+
 ## Безопасность
 
 - Регистрации лежат в `~/.bax/lite.json` с правами 600 — в файле секреты агентов, его не
@@ -148,3 +156,7 @@ in `~/.bax/lite.json` (mode 600), reads its own Claude Code session file to show
 app, and runs no commands itself. No third-party dependencies: it runs on the system `python3`
 (3.9+) using only the standard library — nothing to install besides the plugin itself.
 Licensed under the Apache License 2.0.
+
+While the Mac sleeps, the agent is offline; after wake-up the plugin reconnects within seconds.
+To keep the agent reachable with the screen locked, prevent sleep on power adapter
+(System Settings → Battery → Options…, or `sudo pmset -c sleep 0`).
