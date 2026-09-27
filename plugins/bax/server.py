@@ -52,7 +52,9 @@ CAPS = {
 }
 
 #: Сколько сообщений истории отдаём при открытии агента и за одно листание вверх
-HISTORY_LIMIT = 10
+#: Столько сообщений переписки (заказчик 27.09: сначала «пачкой по 30», потом — 50),
+#: шаги между ними — свёрнутыми
+HISTORY_LIMIT = 50
 
 INSTRUCTIONS = "\n".join([
     "Отправитель читает Бакс на телефоне, а не этот терминал. Всё, что вы хотите ему "
@@ -184,7 +186,8 @@ class Channel:
 
     async def send_history(self, messages: list[history.Message]) -> None:
         for message in messages:
-            await self.send("message", id=message.id, kind=message.kind, text=message.text)
+            extra = {"count": message.count} if message.kind == "steps" else {}
+            await self.send("message", id=message.id, kind=message.kind, text=message.text, **extra)
 
     async def reply(self, text: str) -> None:
         """Ответ модели — в приложение. Ход на этом заканчивается: вопросы этого хода решены
@@ -248,7 +251,7 @@ class Channel:
             await self.status(self.state)
         elif kind == "history":
             before = int(frame.get("before") or 0)
-            limit = min(int(frame.get("limit") or HISTORY_LIMIT), 50)
+            limit = min(int(frame.get("limit") or HISTORY_LIMIT), 100)
             await self.send_history(history.before(self.transcript(), before, limit))
         elif kind == "run":
             await self.run(str(frame.get("text") or ""))

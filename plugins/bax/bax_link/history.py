@@ -48,8 +48,21 @@ def _task_line(text: str) -> str | None:
 @dataclass(frozen=True)
 class Message:
     id: int
-    kind: str  # user | assistant | thinking | tool
+    kind: str  # user | assistant | thinking | tool | steps
     text: str
+    #: у `steps` — сколько шагов свёрнуто в строку (в `text` — последние из них)
+    count: int = 0
+
+
+#: Сообщения переписки: по ним считается страница истории (заказчик 27.09: 30, потом 50).
+#: Всё остальное — шаги агента между ними: вызовы инструментов и рассуждения
+CONVERSATION = ("user", "assistant")
+STEP_KINDS = ("tool", "thinking")
+#: Сколько последних строк шагов показывать в свёрнутой строке — остальное только числом
+STEPS_SHOWN = 40
+#: Сколько записей просмотреть самое большее ради одной страницы: у сессии бывают тысячи шагов
+#: без единого сообщения, и читать ради страницы весь файл незачем
+SCAN_LIMIT = 5000
 
 
 def projects_root() -> Path:
@@ -203,22 +216,55 @@ def _messages_backwards(file: Path, before: int | None = None):
 
 
 def _last(file: Path | None, limit: int, before: int | None = None) -> list[Message]:
+    """Последние `limit` сообщений переписки вместе с шагами между ними, шаги — свёрнутыми.
+
+    Считаются только сообщения (заказчик 27.09): шагов между ними бывают десятки, и страница
+    из десяти строк состояла из одних шагов — своё сообщение человек находил далеко вверху
+    и думал, что оно пропало."""
     if file is None or not file.exists():
         return []
     found: list[Message] = []
+    conversation = 0
     for message in _messages_backwards(file, before):
         found.append(message)
-        if len(found) >= limit:
+        if message.kind in CONVERSATION:
+            conversation += 1
+            if conversation >= limit:
+                break
+        if len(found) >= SCAN_LIMIT:
             break
-    return list(reversed(found))
+    return group_steps(list(reversed(found)))
 
 
-def tail(file: Path | None, limit: int = 10) -> list[Message]:
+def group_steps(messages: list[Message]) -> list[Message]:
+    """Подряд идущие шаги агента — одной строкой `steps`: сколько их и последние из них."""
+    grouped: list[Message] = []
+    run: list[Message] = []
+
+    def flush() -> None:
+        if not run:
+            return
+        lines = [step.text if step.kind == "tool" else "рассуждение: " + step.text.split("\n", 1)[0][:120]
+                 for step in run]
+        grouped.append(Message(run[-1].id, "steps", "\n".join(lines[-STEPS_SHOWN:]), count=len(run)))
+        run.clear()
+
+    for message in messages:
+        if message.kind in STEP_KINDS:
+            run.append(message)
+        else:
+            flush()
+            grouped.append(message)
+    flush()
+    return grouped
+
+
+def tail(file: Path | None, limit: int = 50) -> list[Message]:
     """Последние сообщения — то, что приложение получает при открытии агента."""
     return _last(file, limit)
 
 
-def before(file: Path | None, before_id: int, limit: int = 10) -> list[Message]:
+def before(file: Path | None, before_id: int, limit: int = 50) -> list[Message]:
     """Листание вверх: сообщения со строк раньше `before_id`."""
     return _last(file, limit, before_id)
 

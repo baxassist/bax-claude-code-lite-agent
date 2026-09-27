@@ -219,10 +219,36 @@ async def test_history_comes_from_the_session_file(channel, transcript):
         (0, "user", "сделай ревью"),
         (1, "assistant", "Смотрю код"),
         (3, "user", "собери проект"),
-        (4, "thinking", "думаю"),
-        (4, "tool", "Bash: make"),
+        # шаги между сообщениями — одной строкой (заказчик 27.09)
+        (4, "steps", "рассуждение: думаю\nBash: make"),
         (6, "assistant", "собрал"),
     ]
+    steps = [f for f in channel.link.of("message") if f["kind"] == "steps"]
+    assert steps[0]["count"] == 2
+
+
+def test_history_page_counts_conversation_not_steps(tmp_path):
+    """Страница истории — N сообщений переписки, а не N строк: шагов между сообщениями бывают
+    десятки, и страница из одних шагов прятала свои сообщения (заказчик 27.09)."""
+    history = channel_module.history
+    entries = [{"type": "user", "message": {"content": "первая задача"}}]
+    for number in range(60):
+        entries.append({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "name": "Bash", "input": {"command": f"шаг {number}"}}]}})
+    entries.append({"type": "user", "message": {"content": "вторая задача"}})
+    entries.append({"type": "assistant", "message": {"content": [{"type": "text", "text": "готово"}]}})
+    file = tmp_path / "s.jsonl"
+    file.write_text("\n".join(json.dumps(e, ensure_ascii=False) for e in entries) + "\n", encoding="utf-8")
+
+    page = history.tail(file, 3)
+    assert [m.kind for m in page] == ["user", "steps", "user", "assistant"]
+    assert page[1].count == 60
+    # в строке — последние шаги, остальное только числом
+    assert page[1].text.splitlines()[-1] == "Bash: шаг 59"
+    assert len(page[1].text.splitlines()) == history.STEPS_SHOWN
+
+    # две последние реплики — первая задача и шаги до неё в страницу не попадают
+    assert [m.kind for m in history.tail(file, 2)] == ["user", "assistant"]
 
 
 async def test_history_pages_back(channel, transcript):
