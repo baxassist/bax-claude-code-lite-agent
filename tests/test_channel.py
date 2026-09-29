@@ -41,9 +41,15 @@ class FakeLink:
 
     def __init__(self) -> None:
         self.frames: list[dict] = []
+        self.connected = True
+        self.stopped = False
 
     async def send(self, type_: str, **fields) -> None:
         self.frames.append({"type": type_, **fields})
+
+    def stop(self) -> None:
+        self.stopped = True
+        self.connected = False
 
     def of(self, type_: str) -> list[dict]:
         return [f for f in self.frames if f["type"] == type_]
@@ -484,3 +490,177 @@ def test_phrase_inside_command_output_is_not_a_task():
     tracked.observe({"type": "user", "message": {"content": [
         {"type": "tool_result", "tool_use_id": "t9", "content": output}]}})
     assert tracked.running == {}
+
+
+# --- разговор продолжен в другой сессии, доставка и честный reply (29.09) ------------------
+
+NEXT_SESSION = "99998888-7777-6666-5555-444433332222"
+
+
+def _line(entry: dict) -> bytes:
+    return (json.dumps(entry, ensure_ascii=False) + "\n").encode()
+
+
+def test_handed_over_is_read_from_the_tail(tmp_path):
+    """Claude Code увёл разговор в фоновую копию: в файле прежней сессии — `continued-in`,
+    после него только записи очереди. Вернулись в сессию и повели ход — она снова живая."""
+    history = channel_module.history
+    file = tmp_path / "s.jsonl"
+    file.write_bytes(
+        _line({"type": "assistant", "message": {"content": [{"type": "text", "text": "итог"}]}})
+        + _line({"type": "system", "subtype": "turn_duration"})
+    )
+    assert history.handed_over(file) == ""
+
+    with file.open("ab") as fh:
+        fh.write(_line({"type": "continued-in", "continuedInSessionId": NEXT_SESSION}))
+        fh.write(_line({"type": "queue-operation", "operation": "enqueue", "content": "задача"}))
+        fh.write(b'{"type": "queue-oper')  # строка ещё пишется
+    assert history.handed_over(file) == NEXT_SESSION
+
+    with file.open("ab") as fh:
+        fh.write(b'ation", "operation": "enqueue"}\n')
+        fh.write(_line({"type": "user", "message": {"content": "я вернулся"}}))
+    assert history.handed_over(file) == "", "после передачи в сессии снова идёт ход"
+    assert history.handed_over(tmp_path / "нет.jsonl") == ""
+
+
+def test_follower_sees_the_queue_and_the_handover(tmp_path):
+    """Слежение считает, сколько раз сессия взяла что-то из очереди, и видит передачу разговора."""
+    history = channel_module.history
+    file = tmp_path / "s.jsonl"
+    file.write_bytes(b"")
+    follower = history.Follower.at_end(file)
+
+    with file.open("ab") as fh:
+        fh.write(_line({"type": "queue-operation", "operation": "enqueue", "content": "раз"}))
+        fh.write(_line({"type": "queue-operation", "operation": "dequeue"}))
+        fh.write(_line({"type": "queue-operation", "operation": "enqueue", "content": "два"}))
+        fh.write(_line({"type": "queue-operation", "operation": "remove", "reason": "absorbed_mid_turn"}))
+        fh.write(_line({"type": "queue-operation", "operation": "enqueue", "content": "три"}))
+    follower.poll()
+    assert follower.taken == 2, "взято два из трёх: третье так и лежит в очереди"
+    assert follower.moved_to == ""
+
+    with file.open("ab") as fh:
+        fh.write(_line({"type": "continued-in", "continuedInSessionId": NEXT_SESSION}))
+    follower.poll()
+    assert follower.moved_to == NEXT_SESSION
+
+
+async def test_handed_over_session_releases_the_agent(channel, transcript):
+    """Открыли агента, а разговор этой сессии уже продолжен в другой: телефон узнаёт об этом
+    словами, с командой для запуска, а агент отпущен — его подхватит сессия с каналом."""
+    with transcript.open("ab") as fh:
+        fh.write(b'age": {"content": []}}\n')  # дописали строку, оставленную фикстурой
+        fh.write(_line({"type": "system", "subtype": "turn_duration"}))
+        fh.write(_line({"type": "continued-in", "continuedInSessionId": NEXT_SESSION}))
+        fh.write(_line({"type": "queue-operation", "operation": "enqueue", "content": "задача"}))
+
+    await channel.on_frame({"type": "subscribe"})
+
+    error = channel.link.of("error")[-1]
+    assert error["code"] == "agent_offline"
+    assert NEXT_SESSION in error["message"] and "--resume" in error["message"]
+    assert channel.link.stopped, "агента не отпустили"
+    assert channel.moved_to == NEXT_SESSION
+
+    # задача, пришедшая следом, в мёртвую сессию не уходит
+    sent = len(channel.session.sent)
+    await channel.on_frame({"type": "run", "text": "ты тут?"})
+    assert len(channel.session.sent) == sent, "задача ушла в сессию, которая ходов не ведёт"
+    assert channel.link.of("error")[-1]["code"] == "agent_offline"
+
+
+async def test_handover_during_the_watch_releases_the_agent(channel, transcript, monkeypatch):
+    """Разговор увели, пока плагин следил за файлом: слежение видит запись и отпускает агента."""
+    with transcript.open("ab") as fh:
+        fh.write(b'age": {"content": []}}\n')
+    channel.follower = channel.fresh_follower()
+    with transcript.open("ab") as fh:
+        fh.write(_line({"type": "continued-in", "continuedInSessionId": NEXT_SESSION}))
+
+    async def no_wait(_seconds):
+        return None
+
+    monkeypatch.setattr(channel_module.asyncio, "sleep", no_wait)
+    await channel.follow()  # возвращается сама: после передачи следить незачем
+
+    assert channel.link.stopped
+    assert channel.link.of("error")[-1]["code"] == "agent_offline"
+
+
+async def test_task_not_taken_by_idle_session_is_reported(channel, transcript, monkeypatch):
+    """Сессия простаивает, а задачу с телефона не взяла: телефон получает «не доставлено»,
+    а не ждёт ответа молча (29.09: два сообщения остались в очереди неактивной сессии)."""
+    monkeypatch.setattr(channel_module, "DELIVERY_WAIT", 0)
+    with transcript.open("ab") as fh:
+        fh.write(b'age": {"content": []}}\n')
+        fh.write(_line({"type": "system", "subtype": "turn_duration"}))
+    channel.follower = channel.fresh_follower()
+    channel.follower.turn = "ready"
+
+    with transcript.open("ab") as fh:
+        fh.write(_line({"type": "queue-operation", "operation": "enqueue", "content": "задача"}))
+    channel.follower.poll()
+    await channel.watch_delivery(taken=0)
+
+    error = channel.link.of("error")[-1]
+    assert error["code"] == "agent_offline" and "не доставлено" in error["message"].lower()
+    assert channel.link.of("status")[-1]["state"] == "ready"
+
+
+async def test_taken_or_busy_is_not_reported(channel, transcript, monkeypatch):
+    """Сессия взяла задачу — или ведёт ход и возьмёт её между шагами: тревоги нет."""
+    monkeypatch.setattr(channel_module, "DELIVERY_WAIT", 0)
+    with transcript.open("ab") as fh:
+        fh.write(b'age": {"content": []}}\n')
+    channel.follower = channel.fresh_follower()
+
+    with transcript.open("ab") as fh:
+        fh.write(_line({"type": "queue-operation", "operation": "enqueue", "content": "задача"}))
+        fh.write(_line({"type": "queue-operation", "operation": "dequeue"}))
+    channel.follower.poll()
+    await channel.watch_delivery(taken=0)
+    assert channel.link.of("error") == [], "задачу взяли, а телефону сказали, что нет"
+
+    with transcript.open("ab") as fh:
+        fh.write(_line({"type": "assistant", "message": {"content": [{"type": "text", "text": "работаю"}]}}))
+        fh.write(_line({"type": "queue-operation", "operation": "enqueue", "content": "ещё"}))
+    channel.follower.poll()
+    await channel.watch_delivery(taken=channel.follower.taken)
+    assert channel.link.of("error") == [], "идёт ход — задачу возьмут между шагами"
+
+
+def test_reply_says_honestly_whether_it_was_delivered(channel):
+    """`reply` отвечает модели правду: до 0.5.1 это всегда было «Доставлено в Бакс», и модель
+    из сессии без канала отвечала человеку в пустоту."""
+    assert channel.deliver("готово") == ("Доставлено в Бакс.", False)
+
+    channel.link.connected = False
+    text, failed = channel.deliver("готово")
+    assert not failed and "когда связь вернётся" in text
+
+    channel.link.connected = True
+    channel.moved_to = NEXT_SESSION
+    text, failed = channel.deliver("готово")
+    assert failed and text.startswith("Не доставлено")
+
+    channel.moved_to = ""
+    channel.link = None
+    text, failed = channel.deliver("готово")
+    assert failed and "без канала" in text
+
+
+async def test_handed_over_session_does_not_take_the_agent(channel, transcript, monkeypatch):
+    """Плагин поднялся в сессии, разговор которой уже продолжен в другой: на связь не выходит."""
+    with transcript.open("ab") as fh:
+        fh.write(b'age": {"content": []}}\n')
+        fh.write(_line({"type": "continued-in", "continuedInSessionId": NEXT_SESSION}))
+    channel_module.save_registration(channel.project, "a:k:s", "wss://relay.example/agent")
+    monkeypatch.setattr(channel_module, "channel_enabled", lambda: True)
+    channel.link = None
+
+    await channel_module.connect(channel)
+
+    assert channel.link is None and channel.moved_to == NEXT_SESSION

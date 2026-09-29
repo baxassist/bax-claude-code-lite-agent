@@ -73,6 +73,38 @@ Lite проще и безопаснее: Claude Code ведёте вы, плаг
 «агент занят» и подключится сама, когда первая закроется. Закрыли терминал — агент в приложении
 «не на связи».
 
+## Если разговор ушёл в фоновую сессию
+
+Claude Code умеет уводить разговор в фон: команды `/bg` и `/background` или стрелка влево
+на пустой строке ввода (список агентов). Разговор при этом продолжается в **новой** сессии,
+а канал Бакса в неё не переходит: фоновая сессия наследует настройки запуска, но не флаг
+канала. Прежняя сессия остаётся запущенной, ходов больше не ведёт, а задачи с телефона
+складывает в очередь и не разбирает.
+
+Плагин это замечает — по записи `continued-in` в файле своей сессии — и с версии 0.5.1:
+
+- говорит в приложении, что разговор продолжен в другой сессии, и показывает команду,
+  которой её открыть с каналом;
+- отпускает агента, чтобы его подхватила сессия с каналом;
+- не принимает в такую сессию новые задачи: телефон сразу получает «не доставлено».
+
+Вернуть связь — открыть продолжение с каналом:
+
+```bash
+claude --dangerously-load-development-channels plugin:bax@baxassist --resume <id сессии>
+```
+
+Сделать так, чтобы фоновая сессия сама принимала задачи с телефона, плагин не может: канал
+включается только флагом при запуске, а фоновую сессию запускает сам Claude Code.
+
+## Доставка без догадок
+
+- Сессия простаивает, а задачу с телефона за 20 секунд не взяла — приложение получает
+  «не доставлено». Занятая сессия берёт задачу между шагами хода, и это не тревога.
+- Инструмент `reply` отвечает модели правду: «Доставлено в Бакс» — только когда связь есть.
+  В сессии без канала или после передачи разговора модель узнаёт, что ответ не дошёл,
+  и отвечает в терминале.
+
 ## Когда Mac спит
 
 Пока Mac спит, плагин стоит, и агент в приложении «не на связи». Проснулся — плагин
@@ -156,6 +188,13 @@ in `~/.bax/lite.json` (mode 600), reads its own Claude Code session file to show
 app, and runs no commands itself. No third-party dependencies: it runs on the system `python3`
 (3.9+) using only the standard library — nothing to install besides the plugin itself.
 Licensed under the Apache License 2.0.
+
+If Claude Code moves the conversation to a background session (`/bg`, `/background`, or the
+left arrow on an empty prompt), the channel does not follow it: background sessions do not
+inherit the channel flag. Since 0.5.1 the plugin notices the `continued-in` record in its session
+file, tells the app what happened and how to reopen the conversation with the channel, releases
+the agent, and reports tasks the session did not pick up as undelivered. The `reply` tool tells
+the model whether the answer actually reached the phone.
 
 While the Mac sleeps, the agent is offline; after wake-up the plugin reconnects within seconds.
 To keep the agent reachable with the screen locked, prevent sleep on power adapter

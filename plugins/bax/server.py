@@ -51,6 +51,15 @@ CAPS = {
     "remember": False,
 }
 
+#: Сколько ждём, что сессия возьмёт задачу с телефона. Простаивающая сессия берёт её сразу,
+#: занятая — между шагами хода; не взяла за это время и хода не ведёт — не взяла вовсе
+DELIVERY_WAIT = 20.0
+
+#: Что сказать телефону, когда разговор увели в другую сессию
+MOVED = ("Разговор продолжен в другой сессии Claude Code — эта задач больше не берёт. "
+         "Чтобы Бакс снова был на связи, откройте продолжение с каналом: "
+         "claude --dangerously-load-development-channels plugin:bax@baxassist --resume {session}")
+
 #: Сколько сообщений истории отдаём при открытии агента и за одно листание вверх
 #: Столько сообщений переписки (заказчик 27.09: сначала «пачкой по 30», потом — 50),
 #: шаги между ними — свёрнутыми
@@ -126,6 +135,8 @@ class Channel:
         self.state = "ready"
         #: что дописано в файл сессии после истории — на телефон сразу, а не при новом открытии
         self.follower: history.Follower | None = None
+        #: разговор продолжен в другой сессии, агента отпустили — её id
+        self.moved_to = ""
 
     # --- наружу, в Бакс ------------------------------------------------------
 
@@ -158,6 +169,8 @@ class Channel:
             for message in self.follower.poll():
                 self.entry = max(self.entry, message.id)
                 await self.send("message", id=message.id, kind=message.kind, text=message.text)
+            if self.follower.moved_to:
+                return await self.release(self.follower.moved_to)
             # состояние — по файлу: ход идёт и после `reply`, и когда задачу дали в терминале.
             # Карточка разрешения без ответа («waiting») важнее — её не перетираем
             turn = self.follower.state
@@ -166,6 +179,48 @@ class Channel:
             if self.follower.tasks_changed:
                 self.follower.tasks_changed = False
                 await self.send_background()
+
+    async def release(self, session: str) -> None:
+        """Разговор продолжен в другой сессии (29.09): эта ходов больше не ведёт, а задачи
+        с телефона складывает в очередь и не разбирает. Говорим об этом телефону и отпускаем
+        агента — его подхватит сессия с каналом, в которой разговор идёт на самом деле."""
+        if self.moved_to:
+            return
+        self.moved_to = session
+        logger.info("разговор продолжен в сессии %s — отпускаю агента", session)
+        await self.send("error", code="agent_offline", message=MOVED.format(session=session))
+        if self.link is not None:
+            self.link.stop()
+
+    async def watch_delivery(self, taken: int) -> None:
+        """Взяла ли сессия задачу с телефона. Простаивающая берёт сразу, занятая — между шагами
+        хода. Не взяла и хода не ведёт — телефон узнаёт об этом, а не ждёт ответа молча."""
+        await asyncio.sleep(DELIVERY_WAIT)
+        follower = self.follower
+        if follower is None or follower.taken > taken or self.moved_to:
+            return
+        if follower.turn == "busy":
+            return  # идёт ход: задачу возьмут, когда кончится текущий шаг
+        logger.warning("сессия не взяла задачу с телефона за %s с", DELIVERY_WAIT)
+        await self.send("error", code="agent_offline",
+                        message="Сессия Claude Code не взяла сообщение: она неактивна или разговор "
+                                "продолжен в другом окне. Сообщение не доставлено.")
+        await self.status("ready")
+
+    def deliver(self, text: str) -> tuple[str, bool]:
+        """Что ответить модели на `reply`: дошёл ли ответ до телефона. Второе — ошибка ли это.
+        До 0.5.1 ответ был один, «Доставлено в Бакс», даже когда связи не было вовсе — 29.09
+        модель так отвечала в пустоту из сессии без канала."""
+        if self.link is None:
+            return ("Не доставлено: эта сессия не на связи с Баксом — она запущена без канала "
+                    "или агент не подключён. Человек читает терминал: ответьте здесь."), True
+        if self.moved_to:
+            return ("Не доставлено: разговор продолжен в другой сессии, агента отпустили. "
+                    "Ответьте в терминале."), True
+        if not getattr(self.link, "connected", True):
+            return ("Связи с Баксом сейчас нет: ответ записан и появится в переписке, "
+                    "когда связь вернётся."), False
+        return "Доставлено в Бакс.", False
 
     def fresh_follower(self) -> history.Follower:
         """Слежение с конца файла, но фоновые задачи — не с нуля (заказчик 24.09: при идущей
@@ -242,6 +297,10 @@ class Channel:
             # слежение — с того места, где кончилась история: без дыр и без повторов
             self.follower = self.fresh_follower()
             await self.send_history(history.tail(self.transcript(), HISTORY_LIMIT))
+            # разговор увели, пока за файлом никто не следил, — слежение с конца этого не увидит
+            moved = history.handed_over(self.transcript())
+            if moved:
+                return await self.release(moved)
             for card in self.pending.values():
                 await self.send("question", **card)
             await self.send_background()
@@ -272,10 +331,15 @@ class Channel:
         if not text.strip():
             return await self.send("error", code="internal", message="пустая задача")
         await self.send("message", id=self.next_id(), kind="user", text=text)
+        if self.moved_to:
+            return await self.send("error", code="agent_offline",
+                                   message=MOVED.format(session=self.moved_to))
+        taken = self.follower.taken if self.follower else 0
         if not await self.push(text):
             return await self.send("error", code="agent_offline",
                                    message="Сессия Claude Code закрылась — откройте её снова")
         await self.status("busy")
+        asyncio.ensure_future(self.watch_delivery(taken))
 
     async def stop_background(self, task_id: str) -> None:
         """«Остановить» у фоновой задачи в приложении. Снаружи задачу не остановить — у Claude
@@ -345,8 +409,9 @@ def build(channel: Channel) -> StdioServer:
 
     async def call_tool(name: str, arguments: dict):
         if name == "reply":
+            answer = channel.deliver(str(arguments.get("text") or ""))
             await channel.reply(str(arguments.get("text") or ""))
-            return "Доставлено в Бакс.", False
+            return answer
         if name == "connect":
             try:
                 entry = save_registration(
@@ -456,6 +521,12 @@ async def connect(channel: Channel) -> None:
     entry = load_registration(channel.project)
     if entry is None:
         logger.info("для %s агент не заведён — канал молчит. Подключить: /bax:connect", channel.project)
+        return
+    moved = history.handed_over(channel.transcript())
+    if moved:
+        # разговор этой сессии уже продолжен в другой: занимать агента незачем
+        channel.moved_to = moved
+        logger.info("разговор продолжен в сессии %s — на связь не выходим", moved)
         return
     link = Link(
         entry["server"], entry["key_id"], entry["secret"], __version__,

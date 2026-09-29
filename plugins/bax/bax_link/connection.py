@@ -83,6 +83,8 @@ class Link:
         self.settings: dict = {}
         self._ws: websocket.WebSocket | None = None
         self.user: str | None = None
+        #: связь больше не нужна: агента отпустили (разговор продолжен в другой сессии)
+        self.stopped = False
         #: почему соединение оборвал сторож; пусто — не он
         self.dropped = ""
 
@@ -189,10 +191,25 @@ class Link:
             if time.time() - before > step + SLEEP_GAP:
                 return True
 
+    @property
+    def connected(self) -> bool:
+        """Есть ли связь прямо сейчас: кадр, отправленный без неё, до телефона не дойдёт."""
+        return self._ws is not None
+
+    def stop(self) -> None:
+        """Отпустить агента: закрыть соединение и больше не переподключаться."""
+        self.stopped = True
+        self.dropped = "агента отпустили"
+        if self._ws is not None:
+            self._ws.abort()
+
     async def run(self, on_ready: Handler, on_frame: Handler) -> None:
-        """Держит связь, пока агента не остановят. Возвращается только при фатальной ошибке ключа."""
+        """Держит связь, пока агента не остановят или не отпустят (`stop`). Исключение —
+        только при фатальной ошибке ключа."""
         attempt = 0
         while True:
+            if self.stopped:
+                return
             self.dropped = ""
             try:
                 await self._session(on_ready, on_frame)
@@ -208,6 +225,9 @@ class Link:
             except (OSError, websocket.WebSocketError) as error:
                 logger.warning("связи нет (%s)", self.dropped or error)
 
+            if self.stopped:
+                logger.info("агента отпустили — на связь больше не выходим")
+                return
             if self.dropped == SLEPT:
                 # после сна — сразу: не поднялась ещё сеть — дальше пойдут обычные паузы
                 attempt = 0

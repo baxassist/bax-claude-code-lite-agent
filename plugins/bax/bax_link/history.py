@@ -301,6 +301,53 @@ def turn_state(entry: dict) -> str | None:
     return None
 
 
+#: Очередь сессии: всё, что пришло в неё извне (задача с телефона, уведомление о фоновой
+#: задаче), Claude Code сначала ставит в очередь записью `queue-operation`/`enqueue`, а взяв —
+#: пишет `dequeue` (начал ход) или `remove` (подхватил посреди хода)
+QUEUE = "queue-operation"
+#: Разговор продолжен в другой сессии: Claude Code пишет это в файл прежней, когда уводит
+#: разговор в фоновую копию. Прежняя после этого ходов не ведёт, а очередь не разбирает —
+#: 29.09 два сообщения с телефона так и остались в ней
+CONTINUED = "continued-in"
+
+
+def continued_in(entry: dict) -> str:
+    """Id сессии, в которой продолжен разговор; пусто — запись не об этом."""
+    if entry.get("type") != CONTINUED:
+        return ""
+    return str(entry.get("continuedInSessionId") or "").strip()
+
+
+def handed_over(file: Path | None, window: int = 1 << 20) -> str:
+    """Передан ли разговор другой сессии — по хвосту файла: id новой сессии или пусто.
+
+    Читаем последний мегабайт с конца: записи очереди и служебные пропускаем; встретили
+    `continued-in` раньше, чем любую запись хода, — разговор ушёл. Запись хода позже передачи
+    значит, что в эту сессию вернулись и она снова живая."""
+    if file is None or not file.exists():
+        return ""
+    with file.open("rb") as fh:
+        size = fh.seek(0, 2)
+        fh.seek(max(0, size - window))
+        tail = fh.read()
+    lines = tail.split(b"\n")
+    if size > window:
+        lines = lines[1:]  # первая строка окна, скорее всего, обрезана
+    for raw in reversed(lines):
+        if not raw.strip():
+            continue
+        try:
+            entry = json.loads(raw)
+        except json.JSONDecodeError:
+            continue  # последняя строка может быть недописана
+        moved = continued_in(entry)
+        if moved:
+            return moved
+        if turn_state(entry) is not None:
+            return ""
+    return ""
+
+
 #: Фоновые задачи сессии: запуск виден в результате инструмента, конец — уведомлением
 #: `<task-notification>` или результатом остановки. Пока задача идёт, агент «работает»,
 #: даже если ход закончился (заказчик 23.09: ход кончился ожиданием загрузки — в телефоне
@@ -479,6 +526,10 @@ class Follower:
     tasks: Background = field(default_factory=Background)
     #: список задач поменялся с прошлого раза — приложению стоит прислать его заново
     tasks_changed: bool = False
+    #: сколько раз сессия взяла что-то из своей очереди — по этому видно, дошла ли задача
+    taken: int = 0
+    #: разговор продолжен в другой сессии — её id; пусто — эта сессия ведёт разговор сама
+    moved_to: str = ""
 
     @property
     def background(self) -> dict:
@@ -525,7 +576,14 @@ class Follower:
             except json.JSONDecodeError:
                 continue
             found.extend(messages_from(index, entry, live=True))
-            self.turn = turn_state(entry) or self.turn
+            state = turn_state(entry)
+            self.turn = state or self.turn
+            if entry.get("type") == QUEUE and entry.get("operation") in ("dequeue", "remove"):
+                self.taken += 1
+            if continued_in(entry):
+                self.moved_to = continued_in(entry)
+            elif state is not None:
+                self.moved_to = ""  # в сессию вернулись: после передачи в ней снова идёт ход
             if self.tasks.observe(entry):
                 self.tasks_changed = True
         self.offset += end + 1
