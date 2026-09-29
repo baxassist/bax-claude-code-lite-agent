@@ -17,8 +17,23 @@ from typing import Any, Callable
 
 logger = logging.getLogger("bax.mcp")
 
-#: Какую версию протокола отвечаем, если клиент свою не назвал
-DEFAULT_PROTOCOL = "2025-06-18"
+#: Версии протокола, которые сервер умеет, от новой к старой. Клиент назвал одну из них —
+#: отвечаем ею же; назвал незнакомую — своей новейшей, как велит MCP: обещать версию, которую
+#: не умеешь, нельзя. До 0.5.2 сервер повторял за клиентом любую. Это не формальность: сервер,
+#: согласовавший ревизию 2026-07-28, Claude Code каналом не регистрирует — она не переносит
+#: сообщения канала, — и задачи с телефона пропадали бы молча (документация Claude Code,
+#: «Push messages with channels»; включается настройкой MCP_PROTOCOL_NEGOTIATION=auto)
+SUPPORTED_PROTOCOLS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
+
+
+def negotiate(requested: object) -> str:
+    """Версия протокола для ответа на `initialize`."""
+    if isinstance(requested, str) and requested in SUPPORTED_PROTOCOLS:
+        return requested
+    if requested:
+        logger.warning("клиент назвал версию протокола %r — её сервер не умеет, отвечаю %s",
+                       requested, SUPPORTED_PROTOCOLS[0])
+    return SUPPORTED_PROTOCOLS[0]
 
 #: Вызов инструмента: имя и аргументы → (текст ответа, ошибка ли это)
 ToolHandler = Callable[[str, dict], Awaitable[tuple]]
@@ -65,7 +80,7 @@ class StdioServer:
         try:
             if method == "initialize":
                 result: Any = {
-                    "protocolVersion": params.get("protocolVersion") or DEFAULT_PROTOCOL,
+                    "protocolVersion": negotiate(params.get("protocolVersion")),
                     "capabilities": {"tools": {}, "experimental": self.experimental},
                     "serverInfo": {"name": self.name, "version": self.version},
                     "instructions": self.instructions,

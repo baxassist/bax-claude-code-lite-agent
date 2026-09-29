@@ -111,6 +111,33 @@ async def test_mcp_server_answers_like_claude_code_expects():
                            "params": {"content": "задача"}}
 
 
+@pytest.mark.parametrize("requested, expected", [
+    ("2025-11-25", "2025-11-25"),
+    ("2025-06-18", "2025-06-18"),
+    ("2024-11-05", "2024-11-05"),
+    ("2026-07-28", "2025-11-25"),
+    ("2099-01-01", "2025-11-25"),
+    (None, "2025-11-25"),
+    (["2025-06-18"], "2025-11-25"),
+])
+async def test_mcp_server_never_promises_a_protocol_it_does_not_speak(requested, expected):
+    """Знакомую версию протокола сервер повторяет, незнакомую — нет: отвечает своей новейшей.
+    Сервер, согласовавший ревизию 2026-07-28, Claude Code каналом не регистрирует, и задачи
+    с телефона пропадали бы молча (0.5.2)."""
+    async def call_tool(name, arguments):
+        return "", False
+
+    server = StdioServer("bax", "0.5.2", "инструкции", [], call_tool, experimental={"claude/channel": {}})
+    out = io.BytesIO()
+    server._out = out
+    params = {} if requested is None else {"protocolVersion": requested}
+    await server.handle_line(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                                         "params": params}).encode())
+    await asyncio.sleep(0.02)
+    answer = json.loads(out.getvalue().decode().splitlines()[0])
+    assert answer["result"]["protocolVersion"] == expected
+
+
 def system_python() -> str:
     """Системный python3 Mac (3.9, без пакетов), если он есть; иначе тот, что гоняет тесты."""
     return "/usr/bin/python3" if Path("/usr/bin/python3").exists() else (shutil.which("python3") or sys.executable)

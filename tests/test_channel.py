@@ -61,6 +61,8 @@ def channel(tmp_path, monkeypatch):
     # ни настоящей сессии, ни настоящих файлов Claude Code: тесты гоняют и из-под Claude Code,
     # где CLAUDE_CODE_SESSION_ID задан, — иначе плагин читал бы журнал этой самой сессии
     monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    # …и фоновой сессии: из-под неё подсказка «как открыть с каналом» была бы про неё
+    monkeypatch.delenv("CLAUDE_JOB_DIR", raising=False)
     monkeypatch.setattr(channel_module.history, "projects_root", lambda: tmp_path / "claude-projects")
     made = channel_module.Channel(tmp_path / "проект")
     made.session = FakeSession()
@@ -562,6 +564,7 @@ async def test_handed_over_session_releases_the_agent(channel, transcript):
     error = channel.link.of("error")[-1]
     assert error["code"] == "agent_offline"
     assert NEXT_SESSION in error["message"] and "--resume" in error["message"]
+    assert "claude stop" in error["message"], "фоновую сессию сначала останавливают"
     assert channel.link.stopped, "агента не отпустили"
     assert channel.moved_to == NEXT_SESSION
 
@@ -649,7 +652,51 @@ def test_reply_says_honestly_whether_it_was_delivered(channel):
     channel.moved_to = ""
     channel.link = None
     text, failed = channel.deliver("готово")
-    assert failed and "без канала" in text
+    assert failed and "агент не подключён" in text
+
+
+# --- сессия без канала и фоновая копия разговора (0.5.2, 29.09) -----------------------------
+
+def test_session_without_channel_tells_how_to_reopen(channel, monkeypatch):
+    """Сессия без канала: `reply` говорит модели, что телефон её не видит, и какими командами
+    открыть разговор с каналом. В фоновой сессии команд две — сначала остановить её: пока она
+    жива, `claude --resume` подключает терминал к ней, и флаг канала теряется (29.09)."""
+    short = NEXT_SESSION.split("-")[0]
+    channel.link = None
+    channel.without_channel = True
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", NEXT_SESSION)
+
+    text, failed = channel.deliver("готово")
+    assert failed and "телефон её не видит" in text
+    assert f"--resume {NEXT_SESSION}" in text and "claude stop" not in text
+
+    monkeypatch.setenv("CLAUDE_JOB_DIR", f"/Users/me/.claude/jobs/{short}")
+    text, failed = channel.deliver("готово")
+    assert failed
+    assert text.index(f"claude stop {short}") < text.index(f"--resume {NEXT_SESSION}"), \
+        "сначала остановить фоновую сессию, потом открывать разговор"
+
+
+def test_instructions_depend_on_the_channel(channel, monkeypatch):
+    """Сессии без канала плагин не велит отвечать через `reply`: до 0.5.2 велел, и модель
+    отвечала человеку в пустоту."""
+    monkeypatch.setattr(channel_module, "channel_enabled", lambda: False)
+    server = channel_module.build(channel)
+    assert "без канала" in server.instructions and "{hint}" not in server.instructions
+    assert "plugin:bax@baxassist" in server.instructions
+    assert channel.without_channel
+
+    monkeypatch.setattr(channel_module, "channel_enabled", lambda: True)
+    server = channel_module.build(channel)
+    assert "на телефоне" in server.instructions
+    assert not channel.without_channel
+
+
+def test_moved_hint_stops_the_background_copy_first():
+    """Разговор ушёл в фон: одной команды `--resume` мало — с ней 29.09 телефон сессию
+    так и не увидел."""
+    text = channel_module.moved(NEXT_SESSION)
+    assert text.index(f"claude stop {NEXT_SESSION.split('-')[0]}") < text.index(f"--resume {NEXT_SESSION}")
 
 
 async def test_handed_over_session_does_not_take_the_agent(channel, transcript, monkeypatch):

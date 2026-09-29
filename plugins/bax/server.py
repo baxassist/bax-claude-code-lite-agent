@@ -55,15 +55,55 @@ CAPS = {
 #: занятая — между шагами хода; не взяла за это время и хода не ведёт — не взяла вовсе
 DELIVERY_WAIT = 20.0
 
-#: Что сказать телефону, когда разговор увели в другую сессию
-MOVED = ("Разговор продолжен в другой сессии Claude Code — эта задач больше не берёт. "
-         "Чтобы Бакс снова был на связи, откройте продолжение с каналом: "
+#: Что сказать телефону, когда разговор увели в другую сессию. Команд две: пока фоновая
+#: сессия жива, `claude --resume` не открывает разговор заново, а подключает терминал к ней,
+#: и флаг канала теряется — с одной командой из 0.5.1 телефон сессию так и не увидел (29.09)
+MOVED = ("Разговор продолжен в фоновой сессии Claude Code — эта задач больше не берёт. "
+         "Чтобы Бакс снова был на связи, остановите фоновую сессию (разговор сохранится): "
+         "claude stop {short} — и откройте разговор с каналом: "
          "claude --dangerously-load-development-channels plugin:bax@baxassist --resume {session}")
+
+
+def moved(session: str) -> str:
+    """Подсказка телефону: короткий идентификатор — начало полного, его ждёт `claude stop`."""
+    return MOVED.format(session=session, short=session.split("-")[0])
+
+
+#: Запуск с каналом; маркетплейс один — `baxassist`
+LAUNCH = "claude --dangerously-load-development-channels plugin:bax@baxassist"
+
+
+def background_job() -> str:
+    """Короткий идентификатор фоновой сессии, если плагин поднят в ней, иначе пусто.
+    Фоновой сессии Claude Code даёт папку задания: `CLAUDE_JOB_DIR=…/jobs/<идентификатор>`."""
+    job = os.environ.get("CLAUDE_JOB_DIR") or ""
+    return Path(job).name if job else ""
+
+
+def reopen_hint() -> str:
+    """Какими командами открыть этот разговор так, чтобы его увидел телефон."""
+    session = os.environ.get("CLAUDE_CODE_SESSION_ID") or ""
+    launch = f"{LAUNCH} --resume {session}" if session else LAUNCH
+    job = background_job()
+    if job:
+        return ("это фоновая сессия, канал в неё не включить. Остановите её в своём терминале "
+                f"(разговор сохранится): claude stop {job} — и откройте разговор с каналом: {launch}")
+    return f"закройте сессию и откройте разговор с каналом: {launch}"
 
 #: Сколько сообщений истории отдаём при открытии агента и за одно листание вверх
 #: Столько сообщений переписки (заказчик 27.09: сначала «пачкой по 30», потом — 50),
 #: шаги между ними — свёрнутыми
 HISTORY_LIMIT = 50
+
+#: Сессии без канала — другое: телефон её не видит, и `reply` до человека не дойдёт. До 0.5.2
+#: плагин и ей велел отвечать инструментом — модель честно отвечала в пустоту (29.09)
+OFFLINE_INSTRUCTIONS = "\n".join([
+    "Эта сессия Claude Code запущена без канала Бакса: телефон её не видит, и задачи "
+    f"из Бакса сюда не придут. Инструмент `{REPLY_TOOL}` здесь ничего не доставит — человек "
+    "читает терминал, отвечайте в нём.",
+    "",
+    "Если человек спросит, почему телефон не видит сессию или как его подключить: {hint}.",
+])
 
 INSTRUCTIONS = "\n".join([
     "Отправитель читает Бакс на телефоне, а не этот терминал. Всё, что вы хотите ему "
@@ -137,6 +177,8 @@ class Channel:
         self.follower: history.Follower | None = None
         #: разговор продолжен в другой сессии, агента отпустили — её id
         self.moved_to = ""
+        #: сессия запущена без канала Бакса: на связь не выходим, модели говорим как есть
+        self.without_channel = False
 
     # --- наружу, в Бакс ------------------------------------------------------
 
@@ -188,7 +230,7 @@ class Channel:
             return
         self.moved_to = session
         logger.info("разговор продолжен в сессии %s — отпускаю агента", session)
-        await self.send("error", code="agent_offline", message=MOVED.format(session=session))
+        await self.send("error", code="agent_offline", message=moved(session))
         if self.link is not None:
             self.link.stop()
 
@@ -211,9 +253,13 @@ class Channel:
         """Что ответить модели на `reply`: дошёл ли ответ до телефона. Второе — ошибка ли это.
         До 0.5.1 ответ был один, «Доставлено в Бакс», даже когда связи не было вовсе — 29.09
         модель так отвечала в пустоту из сессии без канала."""
+        if self.link is None and self.without_channel:
+            return ("Не доставлено: эта сессия запущена без канала Бакса, телефон её не видит. "
+                    "Человек читает терминал: ответьте здесь. Чтобы телефон увидел разговор — "
+                    f"{reopen_hint()}"), True
         if self.link is None:
-            return ("Не доставлено: эта сессия не на связи с Баксом — она запущена без канала "
-                    "или агент не подключён. Человек читает терминал: ответьте здесь."), True
+            return ("Не доставлено: эта сессия не на связи с Баксом — агент не подключён "
+                    "или Бакс его не пустил. Человек читает терминал: ответьте здесь."), True
         if self.moved_to:
             return ("Не доставлено: разговор продолжен в другой сессии, агента отпустили. "
                     "Ответьте в терминале."), True
@@ -332,8 +378,7 @@ class Channel:
             return await self.send("error", code="internal", message="пустая задача")
         await self.send("message", id=self.next_id(), kind="user", text=text)
         if self.moved_to:
-            return await self.send("error", code="agent_offline",
-                                   message=MOVED.format(session=self.moved_to))
+            return await self.send("error", code="agent_offline", message=moved(self.moved_to))
         taken = self.follower.taken if self.follower else 0
         if not await self.push(text):
             return await self.send("error", code="agent_offline",
@@ -425,10 +470,10 @@ def build(channel: Channel) -> StdioServer:
                 return "Строка регистрации должна выглядеть как «<id агента>:<id ключа>:<секрет>»", True
             if not channel_enabled():
                 # привязка сохранена, но в этой сессии канала нет — задачи сюда не придут
+                channel.without_channel = True
                 return (f"Проект {channel.project} привязан к агенту {entry['agent'][:8]}…, но эта "
                         "сессия запущена без канала Бакса — задачи с телефона сюда не придут. "
-                        "Запустите в этой папке: claude --dangerously-load-development-channels "
-                        "plugin:bax@baxassist"), False
+                        f"Чтобы телефон её увидел — {reopen_hint()}"), False
             asyncio.ensure_future(connect(channel))
             return (f"Проект {channel.project} привязан к агенту {entry['agent'][:8]}… "
                     "Перезапустите сессию с каналом, если Бакс не загорелся."), False
@@ -439,7 +484,10 @@ def build(channel: Channel) -> StdioServer:
         await channel.ask(str(params.get("request_id") or ""), str(params.get("tool_name") or ""),
                           str(params.get("description") or ""), str(params.get("input_preview") or ""))
 
-    server = StdioServer("bax", __version__, INSTRUCTIONS, TOOLS, call_tool,
+    channel.without_channel = not channel_enabled()
+    instructions = (OFFLINE_INSTRUCTIONS.replace("{hint}", reopen_hint())
+                    if channel.without_channel else INSTRUCTIONS)
+    server = StdioServer("bax", __version__, instructions, TOOLS, call_tool,
                          experimental={"claude/channel": {}, "claude/channel/permission": {}})
     server.on_notification("notifications/claude/channel/permission_request", on_permission_request)
     channel.session = server
@@ -515,9 +563,10 @@ async def connect(channel: Channel) -> None:
     if channel.link is not None:
         return
     if not channel_enabled():
-        logger.info("сессия запущена без канала Бакса — на связь не выходим. Запуск с каналом: "
-                    "claude --dangerously-load-development-channels plugin:bax@baxassist")
+        channel.without_channel = True
+        logger.info("сессия запущена без канала Бакса — на связь не выходим: %s", reopen_hint())
         return
+    channel.without_channel = False
     entry = load_registration(channel.project)
     if entry is None:
         logger.info("для %s агент не заведён — канал молчит. Подключить: /bax:connect", channel.project)

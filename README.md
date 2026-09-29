@@ -88,14 +88,28 @@ Claude Code умеет уводить разговор в фон: команды
 - отпускает агента, чтобы его подхватила сессия с каналом;
 - не принимает в такую сессию новые задачи: телефон сразу получает «не доставлено».
 
-Вернуть связь — открыть продолжение с каналом:
+Вернуть связь — остановить фоновую сессию и открыть разговор с каналом. Команд две,
+и порядок важен:
 
 ```bash
+claude stop <короткий id>      # первые восемь знаков id сессии; разговор сохраняется
 claude --dangerously-load-development-channels plugin:bax@baxassist --resume <id сессии>
 ```
 
+Пока фоновая сессия жива, `claude --resume` не открывает разговор заново, а подключает
+терминал к ней (`claude attach`) — флаг канала при этом теряется, и телефон сессию не видит.
+Обе команды с подставленными идентификаторами плагин показывает сам: в приложении — когда
+разговор ушёл в фон, в терминале — когда модель отвечает из сессии без канала (с версии 0.5.2).
+
 Сделать так, чтобы фоновая сессия сама принимала задачи с телефона, плагин не может: канал
 включается только флагом при запуске, а фоновую сессию запускает сам Claude Code.
+
+## Сессия без канала
+
+Плагин загружается в каждую сессию, в том числе запущенную без флага канала. С версии 0.5.2
+такой сессии он говорит как есть: телефон её не видит, задачи из Бакса не придут, отвечать
+нужно в терминале — и подсказывает, какими командами открыть разговор с каналом. Раньше
+он и ей велел отвечать инструментом `reply`, и ответы уходили в пустоту.
 
 ## Доставка без догадок
 
@@ -134,6 +148,10 @@ claude --dangerously-load-development-channels plugin:bax@baxassist --resume <id
   с каналом Бакса. Ничего не запускает и команд не выполняет.
 - **Зависимости:** никаких — только стандартная библиотека Python. Плагин запускается системным
   `python3` (от 3.9) и ничего не скачивает и не ставит.
+- **Протокол:** MCP версий 2024-11-05 — 2025-11-25. Незнакомую версию плагин за клиентом
+  не повторяет, а отвечает своей новейшей (с 0.5.2): сервер, согласовавший ревизию 2026-07-28,
+  Claude Code каналом не регистрирует. Переменную `MCP_PROTOCOL_NEGOTIATION` для работы канала
+  трогать не нужно.
 
 ## Что внутри
 
@@ -195,6 +213,14 @@ inherit the channel flag. Since 0.5.1 the plugin notices the `continued-in` reco
 file, tells the app what happened and how to reopen the conversation with the channel, releases
 the agent, and reports tasks the session did not pick up as undelivered. The `reply` tool tells
 the model whether the answer actually reached the phone.
+
+To get the phone back, stop the background session first and then reopen the conversation with
+the channel: `claude stop <short id>`, then `claude --dangerously-load-development-channels
+plugin:bax@baxassist --resume <session id>`. While the background session is alive,
+`claude --resume` attaches the terminal to it and the channel flag is dropped. Since 0.5.2 the
+plugin prints both commands with the ids filled in, tells a session started without the channel
+that the phone cannot see it, and never echoes an MCP protocol revision it does not implement
+(Claude Code does not register a server that negotiated revision 2026-07-28 as a channel).
 
 While the Mac sleeps, the agent is offline; after wake-up the plugin reconnects within seconds.
 To keep the agent reachable with the screen locked, prevent sleep on power adapter
