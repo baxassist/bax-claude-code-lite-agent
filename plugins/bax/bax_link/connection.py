@@ -31,8 +31,10 @@ Handler = Callable[[dict], Awaitable[None]]
 FATAL = ("unauthorized", "key_claimed", "wrong_engine", "unsupported_version")
 
 #: «агента уже занял кто-то другой» — не приговор: у Claude Code Lite это вторая сессия
-#: в том же проекте. Закроют её — подключимся сами, поэтому ждём и пробуем снова
+#: в том же проекте. Закроют её — подключимся сами, поэтому ждём и пробуем снова.
+#: `agent_taken` — то же для сессии без канала: агент у сессии с каналом, читать нечего
 BUSY = "agent_busy"
+TAKEN = "agent_taken"
 
 #: раз в столько секунд сторож смотрит на соединение
 WATCH_EVERY = 5
@@ -63,7 +65,7 @@ class Link:
 
     def __init__(self, url: str, key_id: str, secret: str, agent_version: str,
                  engine: str = "claude_code", install_id: str = "", install_name: str = "",
-                 path: str = "", session_id: str = "") -> None:
+                 path: str = "", session_id: str = "", role: str = "") -> None:
         self.url = url
         self.key_id = key_id
         self.secret = secret
@@ -77,6 +79,9 @@ class Link:
         #: id сессии терминала — только у Claude Code Lite: по нему сервер отличает
         #: «та же сессия вернулась после обрыва» от «пришла вторая»
         self.session_id = session_id
+        #: `observer` — сессия без канала: телефон только читает её переписку (0.6.0). Такое
+        #: соединение не занимает агента у сессии с каналом и уступает ей место
+        self.role = role
         #: id агента, который сервер назвал в `ready` — для логов
         self.agent_id = ""
         #: начальные модель и усилие агента — приходят в `ready`, пока их нет
@@ -105,6 +110,8 @@ class Link:
                  "install_name": self.install_name, "path": self.path}
         if self.session_id:
             hello["session_id"] = self.session_id
+        if self.role:
+            hello["role"] = self.role
         await ws.send(frame("hello", **hello))
         answer = parse(await ws.recv())
         if answer.get("type") == "error":

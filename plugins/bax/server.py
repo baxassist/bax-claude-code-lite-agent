@@ -51,6 +51,16 @@ CAPS = {
     "remember": False,
 }
 
+#: Сессия без канала (0.6.0; заказчик 30.09: «ок с тем, чтобы давать телефону фоновую сессию
+#: для чтения»): телефон видит переписку и состояние, а задачи не принимаются — Claude Code
+#: без флага канала уведомления отбрасывает («Channel notifications skipped»)
+READONLY_CAPS = {
+    "mode": "lite",
+    "supports": ["subscribe", "history"],
+    "remember": False,
+    "readonly": True,
+}
+
 #: Сколько ждём, что сессия возьмёт задачу с телефона. Простаивающая сессия берёт её сразу,
 #: занятая — между шагами хода; не взяла за это время и хода не ведёт — не взяла вовсе
 DELIVERY_WAIT = 20.0
@@ -80,29 +90,54 @@ def background_job() -> str:
     return Path(job).name if job else ""
 
 
-def reopen_hint() -> str:
-    """Какими командами открыть этот разговор так, чтобы его увидел телефон."""
+def reopen_commands() -> list[str]:
+    """Команды, которыми открыть этот разговор так, чтобы его увидел телефон, — по порядку.
+    Фоновую копию сначала останавливают: пока она жива, `claude --resume` подключает терминал
+    к ней, и флаг канала теряется (29.09)."""
     session = os.environ.get("CLAUDE_CODE_SESSION_ID") or ""
     launch = f"{LAUNCH} --resume {session}" if session else LAUNCH
     job = background_job()
-    if job:
+    return ([f"claude stop {job}"] if job else []) + [launch]
+
+
+def reopen_hint() -> str:
+    """Какими командами открыть этот разговор так, чтобы его увидел телефон."""
+    commands = reopen_commands()
+    if len(commands) == 2:
         return ("это фоновая сессия, канал в неё не включить. Остановите её в своём терминале "
-                f"(разговор сохранится): claude stop {job} — и откройте разговор с каналом: {launch}")
-    return f"закройте сессию и откройте разговор с каналом: {launch}"
+                f"(разговор сохранится): {commands[0]} — и откройте разговор с каналом: {commands[1]}")
+    return f"закройте сессию и откройте разговор с каналом: {commands[0]}"
+
+
+def readonly_reason() -> str:
+    """Почему телефон только читает эту сессию и как это поправить — текст для приложения."""
+    where = "продолжена в фоне" if background_job() else "запущена без канала Бакса"
+    return (f"Сессия Claude Code {where}: переписку видно, а задачи с телефона сюда не придут — "
+            f"канал включается только флагом при запуске. Чтобы Бакс снова принимал задачи, {reopen_hint()}")
+
+
+def caps_of(channel: "Channel") -> dict:
+    """Кадр `caps` этой сессии: с каналом — полный, без канала — только чтение и почему."""
+    if channel.observer:
+        return {**READONLY_CAPS, "readonly_reason": readonly_reason(), "readonly_commands": reopen_commands()}
+    return CAPS
 
 #: Сколько сообщений истории отдаём при открытии агента и за одно листание вверх
 #: Столько сообщений переписки (заказчик 27.09: сначала «пачкой по 30», потом — 50),
 #: шаги между ними — свёрнутыми
 HISTORY_LIMIT = 50
 
-#: Сессии без канала — другое: телефон её не видит, и `reply` до человека не дойдёт. До 0.5.2
-#: плагин и ей велел отвечать инструментом — модель честно отвечала в пустоту (29.09)
+#: Сессии без канала — другое: задачи с телефона сюда не придут. До 0.5.2 плагин и ей велел
+#: отвечать инструментом — модель честно отвечала в пустоту (29.09). С 0.6.0 телефон такую
+#: сессию читает (если проект привязан к агенту), но ответить из неё не может
 OFFLINE_INSTRUCTIONS = "\n".join([
-    "Эта сессия Claude Code запущена без канала Бакса: телефон её не видит, и задачи "
-    f"из Бакса сюда не придут. Инструмент `{REPLY_TOOL}` здесь ничего не доставит — человек "
-    "читает терминал, отвечайте в нём.",
+    "Эта сессия Claude Code запущена без канала Бакса: задачи из Бакса сюда не придут — канал "
+    "включается только флагом при запуске. Если проект привязан к агенту, телефон видит "
+    "переписку этой сессии, но только читает. Человек пишет в терминале — отвечайте в нём; "
+    f"инструмент `{REPLY_TOOL}` продублирует текст на телефон, ответить оттуда человек не сможет.",
     "",
-    "Если человек спросит, почему телефон не видит сессию или как его подключить: {hint}.",
+    "Если человек спросит, почему телефон не принимает задачи в эту сессию или как это "
+    "поправить: {hint}.",
 ])
 
 INSTRUCTIONS = "\n".join([
@@ -177,8 +212,10 @@ class Channel:
         self.follower: history.Follower | None = None
         #: разговор продолжен в другой сессии, агента отпустили — её id
         self.moved_to = ""
-        #: сессия запущена без канала Бакса: на связь не выходим, модели говорим как есть
+        #: сессия запущена без канала Бакса: задач не принимает, модели говорим как есть
         self.without_channel = False
+        #: …и на связи только для чтения: телефон видит переписку, `run` получает отказ (0.6.0)
+        self.observer = False
 
     # --- наружу, в Бакс ------------------------------------------------------
 
@@ -266,6 +303,9 @@ class Channel:
         if not getattr(self.link, "connected", True):
             return ("Связи с Баксом сейчас нет: ответ записан и появится в переписке, "
                     "когда связь вернётся."), False
+        if self.observer:
+            return ("Доставлено в Бакс — но эта сессия без канала: телефон только читает её и задач "
+                    "сюда не пришлёт. Человек читает и терминал."), False
         return "Доставлено в Бакс.", False
 
     def fresh_follower(self) -> history.Follower:
@@ -331,15 +371,19 @@ class Channel:
     # --- кадры от приложения -------------------------------------------------
 
     async def on_ready(self, _: dict) -> None:
-        await self.send("caps", **CAPS)
+        await self.send("caps", **caps_of(self))
         await self.status(self.state)
+
+    async def refuse_readonly(self) -> None:
+        """Задача или ответ на карточку в сессию без канала: не берём и говорим почему."""
+        await self.send("error", code="readonly", message=readonly_reason())
 
     async def on_frame(self, frame: dict) -> None:
         kind = frame.get("type")
         if kind == "subscribe":
             # экран агента открыли: что умеем, история из файла сессии (там и задачи с
             # телефона, и то, что писали в терминале), вопросы без ответа и состояние
-            await self.send("caps", **CAPS)
+            await self.send("caps", **caps_of(self))
             # слежение — с того места, где кончилась история: без дыр и без повторов
             self.follower = self.fresh_follower()
             await self.send_history(history.tail(self.transcript(), HISTORY_LIMIT))
@@ -358,6 +402,8 @@ class Channel:
             before = int(frame.get("before") or 0)
             limit = min(int(frame.get("limit") or HISTORY_LIMIT), 100)
             await self.send_history(history.before(self.transcript(), before, limit))
+        elif kind in ("run", "background.stop", "answer") and self.observer:
+            await self.refuse_readonly()
         elif kind == "run":
             await self.run(str(frame.get("text") or ""))
         elif kind == "background.stop":
@@ -468,13 +514,14 @@ def build(channel: Channel) -> StdioServer:
                 )
             except ValueError:
                 return "Строка регистрации должна выглядеть как «<id агента>:<id ключа>:<секрет>»", True
+            asyncio.ensure_future(connect(channel))
             if not channel_enabled():
-                # привязка сохранена, но в этой сессии канала нет — задачи сюда не придут
+                # привязка сохранена, но в этой сессии канала нет — задачи сюда не придут,
+                # телефон её только читает
                 channel.without_channel = True
                 return (f"Проект {channel.project} привязан к агенту {entry['agent'][:8]}…, но эта "
-                        "сессия запущена без канала Бакса — задачи с телефона сюда не придут. "
-                        f"Чтобы телефон её увидел — {reopen_hint()}"), False
-            asyncio.ensure_future(connect(channel))
+                        "сессия запущена без канала Бакса — телефон увидит переписку, а задачи "
+                        f"сюда не придут. Чтобы принимала — {reopen_hint()}"), False
             return (f"Проект {channel.project} привязан к агенту {entry['agent'][:8]}… "
                     "Перезапустите сессию с каналом, если Бакс не загорелся."), False
         return f"нет инструмента {name!r}", True
@@ -558,15 +605,13 @@ async def connect(channel: Channel) -> None:
 
     Агента занимает та сессия, которая подключилась первой. Второй сервер получит
     `agent_busy` и будет ждать, пока первая сессия закроется (README, «Одна сессия на агента»).
-    Сессия без канала Бакса на связь не выходит вовсе — см. `channel_enabled`.
+    Сессия без канала Бакса (см. `channel_enabled`) выходит на связь только для чтения
+    (`role: observer`, 0.6.0): телефон видит её переписку и состояние, задачи не принимаются,
+    а сессии с каналом она уступает агента и не занимает его у неё.
     """
     if channel.link is not None:
         return
-    if not channel_enabled():
-        channel.without_channel = True
-        logger.info("сессия запущена без канала Бакса — на связь не выходим: %s", reopen_hint())
-        return
-    channel.without_channel = False
+    channel.without_channel = not channel_enabled()
     entry = load_registration(channel.project)
     if entry is None:
         logger.info("для %s агент не заведён — канал молчит. Подключить: /bax:connect", channel.project)
@@ -577,10 +622,15 @@ async def connect(channel: Channel) -> None:
         channel.moved_to = moved
         logger.info("разговор продолжен в сессии %s — на связь не выходим", moved)
         return
+    channel.observer = channel.without_channel
+    if channel.observer:
+        logger.info("сессия запущена без канала Бакса — на связи только для чтения: телефон увидит "
+                    "переписку, задачи сюда не придут. Чтобы принимала — %s", reopen_hint())
     link = Link(
         entry["server"], entry["key_id"], entry["secret"], __version__,
         engine="claude_code_lite", install_id=install_id(), install_name=os.uname().nodename,
         path=str(channel.project), session_id=channel.chat_id,
+        role="observer" if channel.observer else "",
     )
     channel.link = link
     follower = asyncio.create_task(channel.follow())

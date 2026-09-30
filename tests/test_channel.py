@@ -306,13 +306,73 @@ def test_channel_flag_is_read_from_the_command_line(args, expected):
     assert channel_module.launched_with_channel(args) is expected
 
 
-async def test_session_without_channel_does_not_take_the_agent(channel, monkeypatch):
-    """Привязка есть, но сессия без канала — на связь не выходим, агент остаётся свободным."""
+class FakeLinkClass:
+    """Подмена `Link` в `connect`: запоминает, с чем создали, и не ходит в сеть."""
+
+    made: list["FakeLinkClass"] = []
+
+    def __init__(self, *args, **kwargs) -> None:
+        self.args, self.kwargs = args, kwargs
+        self.connected = True
+        FakeLinkClass.made.append(self)
+
+    async def run(self, on_ready, on_frame) -> None:
+        await on_ready({"type": "ready"})
+
+    async def send(self, type_: str, **fields) -> None:
+        pass
+
+    def stop(self) -> None:
+        self.connected = False
+
+
+async def test_session_without_channel_observes_only(channel, monkeypatch):
+    """Привязка есть, но сессия без канала (30.09, заказчик: «ок с тем, чтобы давать телефону
+    фоновую сессию для чтения»): на связь выходим наблюдателем — телефон видит переписку,
+    а задачу и ответ на карточку получает отказом с командами, как включить канал."""
     channel_module.save_registration(channel.project, "a:k:s", "wss://relay.example/agent")
     monkeypatch.setattr(channel_module, "channel_enabled", lambda: False)
+    monkeypatch.setattr(channel_module, "Link", FakeLinkClass)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", NEXT_SESSION)
+    monkeypatch.setenv("CLAUDE_JOB_DIR", f"/Users/me/.claude/jobs/{NEXT_SESSION.split('-')[0]}")
+    FakeLinkClass.made.clear()
     channel.link = None
     await channel_module.connect(channel)
-    assert channel.link is None
+
+    assert channel.observer and channel.without_channel
+    assert FakeLinkClass.made[-1].kwargs["role"] == "observer"
+
+    channel.link = FakeLink()
+    await channel.on_frame({"type": "subscribe"})
+    caps = channel.link.of("caps")[-1]
+    assert caps["readonly"] is True and "run" not in caps["supports"] and "history" in caps["supports"]
+    assert "продолжена в фоне" in caps["readonly_reason"]
+    short = NEXT_SESSION.split("-")[0]
+    assert caps["readonly_commands"] == [
+        f"claude stop {short}",
+        f"claude --dangerously-load-development-channels plugin:bax@baxassist --resume {NEXT_SESSION}",
+    ]
+
+    sent = len(channel.session.sent)
+    for frame in ({"type": "run", "text": "сделай"}, {"type": "answer", "question_id": "q", "verdict": "allow"},
+                  {"type": "background.stop", "task_id": "t"}):
+        await channel.on_frame(frame)
+        error = channel.link.of("error")[-1]
+        assert error["code"] == "readonly" and "--resume" in error["message"]
+    assert len(channel.session.sent) == sent, "в сессию без канала задача уходить не должна"
+
+    text, failed = channel.deliver("готово")
+    assert not failed and "только читает" in text
+
+
+def test_reopen_commands_for_a_plain_session(monkeypatch):
+    """Обычная сессия без канала (не фоновая): останавливать нечего — одна команда."""
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", NEXT_SESSION)
+    monkeypatch.delenv("CLAUDE_JOB_DIR", raising=False)
+    assert channel_module.reopen_commands() == [
+        f"claude --dangerously-load-development-channels plugin:bax@baxassist --resume {NEXT_SESSION}",
+    ]
+    assert "запущена без канала" in channel_module.readonly_reason()
 
 
 def test_follower_sends_only_what_was_appended(tmp_path):
