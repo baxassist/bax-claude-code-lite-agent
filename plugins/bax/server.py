@@ -47,19 +47,55 @@ REPLY_TOOL = "mcp__plugin_bax_bax__reply"
 #: неработающими. Ни «Стоп», ни смены модели и сессий здесь нет — их некому исполнять
 CAPS = {
     "mode": "lite",
-    "supports": ["subscribe", "run", "answer", "history", "background.stop"],
+    "supports": ["subscribe", "run", "answer", "history", "background.stop", "files.list", "files.read"],
     "remember": False,
 }
+
+#: Файлы проекта с телефона (заказчик 30.09: «согласен, пока только чтение»): только то, что
+#: ведёт git (ключи и `.env` туда не попадают), только текст, не больше этого размера
+FILES_LIMIT = 5000
+FILE_MAX_BYTES = 256 * 1024
+FILES_CACHE_SECONDS = 20
 
 #: Сессия без канала (0.6.0; заказчик 30.09: «ок с тем, чтобы давать телефону фоновую сессию
 #: для чтения»): телефон видит переписку и состояние, а задачи не принимаются — Claude Code
 #: без флага канала уведомления отбрасывает («Channel notifications skipped»)
 READONLY_CAPS = {
     "mode": "lite",
-    "supports": ["subscribe", "history"],
+    "supports": ["subscribe", "history", "files.list", "files.read"],
     "remember": False,
     "readonly": True,
 }
+
+
+def tracked_files(project: Path) -> list[str]:
+    """Пути, которые ведёт git, — по алфавиту. Не git или git не найден — пусто."""
+    try:
+        done = subprocess.run(["git", "-C", str(project), "ls-files", "-z"],
+                              capture_output=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if done.returncode != 0:
+        return []
+    return sorted(name.decode("utf-8", "replace") for name in done.stdout.split(b"\0") if name)
+
+
+def read_project_file(project: Path, path: str, tracked: list[str]) -> dict:
+    """Текст файла проекта для телефона: `text`, `size`, `truncated` — или `error`."""
+    clean = path.strip().lstrip("/")
+    if not clean or ".." in clean.split("/") or clean not in tracked:
+        return {"error": "Такого файла git не ведёт — с телефона читаются только файлы проекта"}
+    full = project / clean
+    try:
+        size = full.stat().st_size
+        with full.open("rb") as fh:
+            raw = fh.read(FILE_MAX_BYTES + 1)
+    except OSError as error:
+        return {"error": f"Файл не прочитался: {error.strerror or error}"}
+    if b"\0" in raw[:8192]:
+        return {"error": "Это не текст — двоичный файл с телефона не показать"}
+    return {"text": raw[:FILE_MAX_BYTES].decode("utf-8", "replace"), "size": size,
+            "truncated": size > FILE_MAX_BYTES}
 
 #: Сколько ждём, что сессия возьмёт задачу с телефона. Простаивающая сессия берёт её сразу,
 #: занятая — между шагами хода; не взяла за это время и хода не ведёт — не взяла вовсе
@@ -216,6 +252,8 @@ class Channel:
         self.without_channel = False
         #: …и на связи только для чтения: телефон видит переписку, `run` получает отказ (0.6.0)
         self.observer = False
+        #: список файлов проекта — на несколько секунд: телефон листает папки, git не дёргаем
+        self.files_cache: tuple[float, list[str]] | None = None
 
     # --- наружу, в Бакс ------------------------------------------------------
 
@@ -378,6 +416,24 @@ class Channel:
         """Задача или ответ на карточку в сессию без канала: не берём и говорим почему."""
         await self.send("error", code="readonly", message=readonly_reason())
 
+    # --- файлы проекта — только чтение (0.7.0) ----------------------------------
+
+    def tracked(self) -> list[str]:
+        now = time.time()
+        if self.files_cache is None or now - self.files_cache[0] > FILES_CACHE_SECONDS:
+            self.files_cache = (now, tracked_files(self.project))
+        return self.files_cache[1]
+
+    async def send_files(self) -> None:
+        paths = self.tracked()
+        if not paths:
+            return await self.send("files", paths=[],
+                                   error="Список файлов пуст: проект не под git или git не найден")
+        await self.send("files", paths=paths[:FILES_LIMIT], truncated=len(paths) > FILES_LIMIT)
+
+    async def send_file(self, path: str) -> None:
+        await self.send("file.text", path=path, **read_project_file(self.project, path, self.tracked()))
+
     async def on_frame(self, frame: dict) -> None:
         kind = frame.get("type")
         if kind == "subscribe":
@@ -402,6 +458,10 @@ class Channel:
             before = int(frame.get("before") or 0)
             limit = min(int(frame.get("limit") or HISTORY_LIMIT), 100)
             await self.send_history(history.before(self.transcript(), before, limit))
+        elif kind == "files.list":
+            await self.send_files()
+        elif kind == "files.read":
+            await self.send_file(str(frame.get("path") or ""))
         elif kind in ("run", "background.stop", "answer") and self.observer:
             await self.refuse_readonly()
         elif kind == "run":

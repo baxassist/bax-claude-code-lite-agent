@@ -771,3 +771,60 @@ async def test_handed_over_session_does_not_take_the_agent(channel, transcript, 
     await channel_module.connect(channel)
 
     assert channel.link is None and channel.moved_to == NEXT_SESSION
+
+
+# --- файлы проекта с телефона — только чтение (0.7.0; заказчик 30.09) ------------------------
+
+async def test_files_are_listed_and_read_only_from_git(channel, tmp_path, monkeypatch):
+    """Телефон получает список путей, которые ведёт git, и текст файла по пути. Файл вне git,
+    выход за папку и двоичный файл — отказ словами, а не содержимым."""
+    project = channel.project
+    project.mkdir(parents=True, exist_ok=True)
+    (project / "docs").mkdir()
+    (project / "docs" / "SITE.md").write_text("# Сайт\n\nОписание.", encoding="utf-8")
+    (project / ".env").write_text("SECRET=1", encoding="utf-8")
+    (project / "logo.png").write_bytes(b"\x89PNG\0\0\0")
+    monkeypatch.setattr(channel_module, "tracked_files", lambda _: ["docs/SITE.md", "logo.png"])
+
+    await channel.on_frame({"type": "files.list"})
+    files = channel.link.of("files")[-1]
+    assert files["paths"] == ["docs/SITE.md", "logo.png"] and files["truncated"] is False
+
+    await channel.on_frame({"type": "files.read", "path": "docs/SITE.md"})
+    shown = channel.link.of("file.text")[-1]
+    assert shown["path"] == "docs/SITE.md" and shown["text"].startswith("# Сайт") and not shown["truncated"]
+
+    for path in (".env", "../secret", "/etc/passwd", ""):
+        await channel.on_frame({"type": "files.read", "path": path})
+        refused = channel.link.of("file.text")[-1]
+        assert "error" in refused and "text" not in refused, path
+    await channel.on_frame({"type": "files.read", "path": "logo.png"})
+    assert "не текст" in channel.link.of("file.text")[-1]["error"]
+
+    caps = channel_module.caps_of(channel)
+    assert "files.list" in caps["supports"] and "files.read" in caps["supports"]
+    channel.observer = True
+    assert "files.read" in channel_module.caps_of(channel)["supports"], "читать файлы можно и из сессии без канала"
+
+
+def test_tracked_files_come_from_git(tmp_path):
+    """Настоящий git: ведомые файлы есть, неведомые (.env) — нет."""
+    import subprocess
+
+    project = tmp_path / "repo"
+    project.mkdir()
+    subprocess.run(["git", "init", "-q", str(project)], check=True)
+    (project / "a.md").write_text("a", encoding="utf-8")
+    (project / ".env").write_text("SECRET=1", encoding="utf-8")
+    subprocess.run(["git", "-C", str(project), "add", "a.md"], check=True)
+    assert channel_module.tracked_files(project) == ["a.md"]
+    assert channel_module.tracked_files(tmp_path / "нет-такой") == []
+
+
+def test_big_file_is_cut(channel, monkeypatch):
+    project = channel.project
+    project.mkdir(parents=True, exist_ok=True)
+    (project / "big.txt").write_text("я" * (channel_module.FILE_MAX_BYTES + 10), encoding="utf-8")
+    monkeypatch.setattr(channel_module, "tracked_files", lambda _: ["big.txt"])
+    shown = channel_module.read_project_file(project, "big.txt", ["big.txt"])
+    assert shown["truncated"] and len(shown["text"].encode("utf-8")) <= channel_module.FILE_MAX_BYTES + 4
