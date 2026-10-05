@@ -201,6 +201,8 @@ Markdown с разметкой. Только чтение и только то, 
 
 ## Тесты
 
+Открытые задачи — в [BACKLOG.md](BACKLOG.md).
+
 ```bash
 uv sync
 uv run pytest
