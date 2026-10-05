@@ -309,7 +309,7 @@ def test_channel_flag_is_read_from_the_command_line(args, expected):
 class FakeLinkClass:
     """Подмена `Link` в `connect`: запоминает, с чем создали, и не ходит в сеть."""
 
-    made: list["FakeLinkClass"] = []
+    made: list[FakeLinkClass] = []
 
     def __init__(self, *args, **kwargs) -> None:
         self.args, self.kwargs = args, kwargs

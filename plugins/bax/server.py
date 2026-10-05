@@ -27,7 +27,7 @@ from typing import Any
 # копируя его папку в свой кэш, и всё, что лежит вне её, туда не попадает
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from bax_link import __version__, history  # noqa: E402
+from bax_link import __version__, attachments, history  # noqa: E402
 from bax_link.connection import HandshakeError, Link  # noqa: E402
 from bax_link.mcp_stdio import StdioServer  # noqa: E402
 
@@ -47,7 +47,8 @@ REPLY_TOOL = "mcp__plugin_bax_bax__reply"
 #: неработающими. Ни «Стоп», ни смены модели и сессий здесь нет — их некому исполнять
 CAPS = {
     "mode": "lite",
-    "supports": ["subscribe", "run", "answer", "history", "background.stop", "files.list", "files.read"],
+    "supports": ["subscribe", "run", "answer", "history", "background.get", "background.stop",
+                 "attachments", "files.list", "files.read"],
     "remember": False,
 }
 
@@ -62,7 +63,7 @@ FILES_CACHE_SECONDS = 20
 #: без флага канала уведомления отбрасывает («Channel notifications skipped»)
 READONLY_CAPS = {
     "mode": "lite",
-    "supports": ["subscribe", "history", "files.list", "files.read"],
+    "supports": ["subscribe", "history", "background.get", "files.list", "files.read"],
     "remember": False,
     "readonly": True,
 }
@@ -152,7 +153,7 @@ def readonly_reason() -> str:
             f"канал включается только флагом при запуске. Чтобы Бакс снова принимал задачи, {reopen_hint()}")
 
 
-def caps_of(channel: "Channel") -> dict:
+def caps_of(channel: Channel) -> dict:
     """Кадр `caps` этой сессии: с каналом — полный, без канала — только чтение и почему."""
     if channel.observer:
         return {**READONLY_CAPS, "readonly_reason": readonly_reason(), "readonly_commands": reopen_commands()}
@@ -462,10 +463,14 @@ class Channel:
             await self.send_files()
         elif kind == "files.read":
             await self.send_file(str(frame.get("path") or ""))
+        elif kind == "background.get":
+            # Перечитать хвост перед ответом: после reconnect старого follower может ещё не быть.
+            self.follower = self.fresh_follower()
+            await self.send_background()
         elif kind in ("run", "background.stop", "answer") and self.observer:
             await self.refuse_readonly()
         elif kind == "run":
-            await self.run(str(frame.get("text") or ""))
+            await self.run(str(frame.get("text") or ""), frame.get("attachments"))
         elif kind == "background.stop":
             await self.stop_background(str(frame.get("task_id") or ""))
         elif kind == "answer":
@@ -479,16 +484,24 @@ class Channel:
         else:
             await self.send("error", code="unsupported", message=f"кадр {kind!r} здесь не умеют")
 
-    async def run(self, text: str) -> None:
-        if not text.strip():
-            return await self.send("error", code="internal", message="пустая задача")
-        await self.send("message", id=self.next_id(), kind="user", text=text)
+    async def run(self, text: str, files: object = None) -> None:
+        original_text = text
         if self.moved_to:
             return await self.send("error", code="agent_offline", message=moved(self.moved_to))
+        if self.session is None:
+            return await self.send("error", code="agent_offline",
+                                   message="Сессия Claude Code закрылась — откройте её снова")
+        try:
+            text += await asyncio.to_thread(attachments.prepare, self.project, files)
+        except (ValueError, OSError) as error:
+            return await self.send("error", code="validation_error", message=str(error))
+        if not text.strip():
+            return await self.send("error", code="internal", message="пустая задача")
         taken = self.follower.taken if self.follower else 0
         if not await self.push(text):
             return await self.send("error", code="agent_offline",
                                    message="Сессия Claude Code закрылась — откройте её снова")
+        await self.send("message", id=self.next_id(), kind="user", text=text, accepted_text=original_text)
         await self.status("busy")
         asyncio.ensure_future(self.watch_delivery(taken))
 
