@@ -256,3 +256,14 @@ that the phone cannot see it, and never echoes an MCP protocol revision it does 
 While the Mac sleeps, the agent is offline; after wake-up the plugin reconnects within seconds.
 To keep the agent reachable with the screen locked, prevent sleep on power adapter
 (System Settings → Battery → Options…, or `sudo pmset -c sleep 0`).
+
+## Контракт доставки 0.8.1
+
+Каждая команда `run` содержит UUID `rid` и строку `text`. Плагин возвращает исходный
+`rid` в подтверждении `message(kind=user)` и в отказе до передачи сессии. Даже если
+к тексту добавлены пути вложений, приложение подтверждает точную задачу по ID.
+Сопоставление подтверждений по совпадению текста больше не требуется.
+
+Этот выпуск не добавляет журнал идемпотентности Claude: повтор команды после
+неизвестного результата ещё может повторить уведомление сессии. Перед повтором
+проверьте историю; durable deduplication и привязка повторов к сессии — отдельный этап.

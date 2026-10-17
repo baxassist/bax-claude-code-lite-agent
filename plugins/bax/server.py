@@ -470,7 +470,17 @@ class Channel:
         elif kind in ("run", "background.stop", "answer") and self.observer:
             await self.refuse_readonly()
         elif kind == "run":
-            await self.run(str(frame.get("text") or ""), frame.get("attachments"))
+            rid = frame.get("rid")
+            try:
+                if not isinstance(rid, str):
+                    raise ValueError("missing request ID")
+                uuid.UUID(rid)
+                if not isinstance(frame.get("text"), str):
+                    raise ValueError("invalid text")
+            except ValueError:
+                return await self.send("error", code="validation_error", operation="run", delivery="rejected",
+                                       message="Задаче нужны UUID rid и текстовая строка")
+            await self.run(frame["text"], frame.get("attachments"), rid=rid)
         elif kind == "background.stop":
             await self.stop_background(str(frame.get("task_id") or ""))
         elif kind == "answer":
@@ -484,24 +494,30 @@ class Channel:
         else:
             await self.send("error", code="unsupported", message=f"кадр {kind!r} здесь не умеют")
 
-    async def run(self, text: str, files: object = None) -> None:
+    async def run(self, text: str, files: object = None, *, rid: str) -> None:
         original_text = text
         if self.moved_to:
-            return await self.send("error", code="agent_offline", message=moved(self.moved_to))
+            return await self.send("error", rid=rid, operation="run", delivery="rejected",
+                                   code="agent_offline", message=moved(self.moved_to))
         if self.session is None:
-            return await self.send("error", code="agent_offline",
+            return await self.send("error", rid=rid, operation="run", delivery="rejected",
+                                   code="agent_offline",
                                    message="Сессия Claude Code закрылась — откройте её снова")
         try:
             text += await asyncio.to_thread(attachments.prepare, self.project, files)
         except (ValueError, OSError) as error:
-            return await self.send("error", code="validation_error", message=str(error))
+            return await self.send("error", rid=rid, operation="run", delivery="rejected",
+                                   code="validation_error", message=str(error))
         if not text.strip():
-            return await self.send("error", code="internal", message="пустая задача")
+            return await self.send("error", rid=rid, operation="run", delivery="rejected",
+                                   code="validation_error", message="пустая задача")
         taken = self.follower.taken if self.follower else 0
         if not await self.push(text):
-            return await self.send("error", code="agent_offline",
-                                   message="Сессия Claude Code закрылась — откройте её снова")
-        await self.send("message", id=self.next_id(), kind="user", text=text, accepted_text=original_text)
+            return await self.send("error", rid=rid, operation="run", delivery="unknown",
+                                   code="agent_offline", message="Подтверждение сессии не получено. "
+                                   "Проверьте историю перед повтором задачи.")
+        await self.send("message", id=self.next_id(), kind="user", text=text,
+                        accepted_text=original_text, rid=rid)
         await self.status("busy")
         asyncio.ensure_future(self.watch_delivery(taken))
 

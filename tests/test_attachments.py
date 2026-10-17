@@ -14,7 +14,7 @@ def file(name="Отчёт.pdf", data=b"%PDF-1.7\n", mime="application/pdf"):
 async def test_documents_and_photos_reach_the_session_as_existing_project_files(channel):
     channel.project.mkdir()
     await channel.on_frame(
-        {"type": "run", "text": "Сравни", "attachments": [file(), file("Фото.jpg", b"photo", "image/jpeg")]}
+        {"type": "run", "rid": "11111111-1111-4111-8111-111111111111", "text": "Сравни", "attachments": [file(), file("Фото.jpg", b"photo", "image/jpeg")]}
     )
     content = channel.session.sent[0][1]["content"]
     paths = [Path(json.loads(line.split(": ", 1)[1])) for line in content.splitlines()[-2:]]
@@ -27,7 +27,7 @@ async def test_documents_and_photos_reach_the_session_as_existing_project_files(
 async def test_document_only_task_and_duplicate_names_are_preserved(channel):
     channel.project.mkdir()
     await channel.on_frame(
-        {"type": "run", "text": "", "attachments": [file(data=b"first"), file(data=b"second")]}
+        {"type": "run", "rid": "11111111-1111-4111-8111-111111111111", "text": "", "attachments": [file(data=b"first"), file(data=b"second")]}
     )
     assert channel.session.sent
     assert sorted(path.read_bytes() for path in channel.project.rglob("Отчёт.pdf")) == [b"first", b"second"]
@@ -46,7 +46,7 @@ async def test_document_only_task_and_duplicate_names_are_preserved(channel):
 )
 async def test_invalid_batch_is_rejected_before_any_file_or_notification(channel, bad):
     channel.project.mkdir()
-    await channel.on_frame({"type": "run", "text": "Задача", "attachments": [file(), bad]})
+    await channel.on_frame({"type": "run", "rid": "11111111-1111-4111-8111-111111111111", "text": "Задача", "attachments": [file(), bad]})
     assert not channel.session.sent and not list(channel.project.iterdir())
     assert channel.link.of("error")[-1]["code"] == "validation_error"
 
@@ -54,7 +54,7 @@ async def test_invalid_batch_is_rejected_before_any_file_or_notification(channel
 async def test_readonly_session_never_writes_incoming_files(channel):
     channel.project.mkdir()
     channel.observer = True
-    await channel.on_frame({"type": "run", "text": "", "attachments": [file()]})
+    await channel.on_frame({"type": "run", "rid": "11111111-1111-4111-8111-111111111111", "text": "", "attachments": [file()]})
     assert not channel.session.sent and not list(channel.project.iterdir())
     assert channel.link.of("error")[-1]["code"] == "readonly"
 

@@ -73,7 +73,7 @@ def channel(tmp_path, monkeypatch):
 async def test_task_from_the_phone_reaches_the_session(channel):
     """Задача с телефона уходит в сессию уведомлением канала — модель видит её сама,
     без единого нажатия в терминале."""
-    await channel.on_frame({"type": "run", "text": "почини тест"})
+    await channel.on_frame({"type": "run", "rid": "11111111-1111-4111-8111-111111111111", "text": "почини тест"})
 
     method, params = channel.session.sent[0]
     assert method == "notifications/claude/channel"
@@ -128,7 +128,7 @@ async def test_what_this_mode_cannot_do_is_said_plainly(channel):
 async def test_session_closed_means_agent_offline(channel):
     """Сессию закрыли — задача не уходит в никуда: телефон получает честное «не запущен»."""
     channel.session = None
-    await channel.on_frame({"type": "run", "text": "собери проект"})
+    await channel.on_frame({"type": "run", "rid": "11111111-1111-4111-8111-111111111111", "text": "собери проект"})
     assert channel.link.of("error")[-1]["code"] == "agent_offline"
 
 
@@ -354,7 +354,7 @@ async def test_session_without_channel_observes_only(channel, monkeypatch):
     ]
 
     sent = len(channel.session.sent)
-    for frame in ({"type": "run", "text": "сделай"}, {"type": "answer", "question_id": "q", "verdict": "allow"},
+    for frame in ({"type": "run", "rid": "11111111-1111-4111-8111-111111111111", "text": "сделай"}, {"type": "answer", "question_id": "q", "verdict": "allow"},
                   {"type": "background.stop", "task_id": "t"}):
         await channel.on_frame(frame)
         error = channel.link.of("error")[-1]
@@ -630,7 +630,7 @@ async def test_handed_over_session_releases_the_agent(channel, transcript):
 
     # задача, пришедшая следом, в мёртвую сессию не уходит
     sent = len(channel.session.sent)
-    await channel.on_frame({"type": "run", "text": "ты тут?"})
+    await channel.on_frame({"type": "run", "rid": "11111111-1111-4111-8111-111111111111", "text": "ты тут?"})
     assert len(channel.session.sent) == sent, "задача ушла в сессию, которая ходов не ведёт"
     assert channel.link.of("error")[-1]["code"] == "agent_offline"
 
@@ -828,3 +828,38 @@ def test_big_file_is_cut(channel, monkeypatch):
     monkeypatch.setattr(channel_module, "tracked_files", lambda _: ["big.txt"])
     shown = channel_module.read_project_file(project, "big.txt", ["big.txt"])
     assert shown["truncated"] and len(shown["text"].encode("utf-8")) <= channel_module.FILE_MAX_BYTES + 4
+
+
+@pytest.mark.parametrize("text", ["повторяющийся текст", "задача с документом"])
+async def test_delivery_receipt_keeps_exact_request_id(channel, text):
+    request_id = "ABCDEF01-1111-4111-8111-111111111111"
+    await channel.on_frame({"type": "run", "rid": request_id, "text": text})
+    assert channel.link.of("message")[-1]["rid"] == request_id
+
+
+@pytest.mark.parametrize("fields", [{"text": "task"}, {"rid": "invalid", "text": "task"},
+                                    {"rid": "11111111-1111-4111-8111-111111111111", "text": {"private": "body"}}])
+async def test_run_without_current_identity_or_text_is_rejected(channel, fields):
+    await channel.on_frame({"type": "run", **fields})
+    assert not channel.session.sent
+    assert channel.link.of("error")[-1]["delivery"] == "rejected"
+    assert channel.link.of("error")[-1]["code"] == "validation_error"
+
+
+async def test_delivery_rejection_identifies_exact_task(channel):
+    channel.session = None
+    request_id = "11111111-1111-4111-8111-111111111111"
+    await channel.on_frame({"type": "run", "rid": request_id, "text": "task"})
+    assert channel.link.of("error")[-1]["rid"] == request_id
+    assert channel.link.of("error")[-1]["delivery"] == "rejected"
+
+
+async def test_notification_exception_keeps_unknown_outcome(channel):
+    async def uncertain(*args):
+        raise OSError("write outcome unknown")
+    channel.session.notify = uncertain
+    request_id = "11111111-1111-4111-8111-111111111111"
+    await channel.on_frame({"type": "run", "rid": request_id, "text": "task"})
+    assert channel.link.of("error")[-1]["rid"] == request_id
+    assert channel.link.of("error")[-1]["delivery"] == "unknown"
+    assert not channel.link.of("message")
