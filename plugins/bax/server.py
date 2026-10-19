@@ -30,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bax_link import __version__, attachments, history  # noqa: E402
 from bax_link.connection import HandshakeError, Link  # noqa: E402
 from bax_link.mcp_stdio import StdioServer  # noqa: E402
+from bax_link.tracing import dependency  # noqa: E402
 
 logging.basicConfig(stream=sys.stderr, level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -388,10 +389,11 @@ class Channel:
         if session is None:
             return False
         try:
-            await session.notify("notifications/claude/channel", {
-                "content": text,
-                "meta": {"source": "bax", "chat_id": self.chat_id},
-            })
+            with dependency("mcp", "notify"):
+                await session.notify("notifications/claude/channel", {
+                    "content": text,
+                    "meta": {"source": "bax", "chat_id": self.chat_id},
+                })
         except Exception as error:  # noqa: BLE001 — связь с сессией важнее любой причины
             logger.warning("задача не дошла до сессии: %s", error)
             return False
@@ -402,10 +404,11 @@ class Channel:
         if session is None:
             return
         with contextlib.suppress(Exception):
-            await session.notify(
-                "notifications/claude/channel/permission",
-                {"request_id": request_id, "behavior": behavior},
-            )
+            with dependency("mcp", "notify"):
+                await session.notify(
+                    "notifications/claude/channel/permission",
+                    {"request_id": request_id, "behavior": behavior},
+                )
 
     # --- кадры от приложения -------------------------------------------------
 

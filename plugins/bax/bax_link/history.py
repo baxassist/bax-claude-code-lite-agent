@@ -20,6 +20,8 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .tracing import dependency
+
 #: Ответ модели в телефон — вызов этого инструмента; в ленте это обычный ответ
 REPLY_TOOL = "mcp__plugin_bax_bax__reply"
 #: Задача с телефона — служебная запись с обёрткой канала
@@ -176,7 +178,9 @@ def messages_from(index: int, entry: dict, live: bool = False) -> list[Message]:
 
 def _lines_backwards(file: Path, chunk: int = 1 << 20):
     """(номер строки, строка) от конца файла к началу — не разбирая весь файл."""
-    with file.open("rb") as fh:
+    with dependency("filesystem", "open"):
+        opened = file.open("rb")
+    with opened as fh:
         size = fh.seek(0, 2)
         if size == 0:
             return
@@ -185,7 +189,8 @@ def _lines_backwards(file: Path, chunk: int = 1 << 20):
         fh.seek(0)
         lines, read = 0, 0
         while read < end:
-            block = fh.read(min(chunk, end - read))
+            with dependency("filesystem", "read"):
+                block = fh.read(min(chunk, end - read))
             read += len(block)
             lines += block.count(b"\n")
         index, position, head = lines, end, b""
@@ -193,7 +198,9 @@ def _lines_backwards(file: Path, chunk: int = 1 << 20):
             step = min(chunk, position)
             position -= step
             fh.seek(position)
-            parts = (fh.read(step) + head).split(b"\n")
+            with dependency("filesystem", "read"):
+                block = fh.read(step)
+            parts = (block + head).split(b"\n")
             head = parts[0]
             for part in reversed(parts[1:]):
                 yield index, part
