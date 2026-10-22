@@ -11,6 +11,17 @@ def file(name="Отчёт.pdf", data=b"%PDF-1.7\n", mime="application/pdf"):
     return {"name": name, "mime": mime, "data": base64.b64encode(data).decode()}
 
 
+async def test_ten_photos_reach_one_session_without_truncation(channel):
+    channel.project.mkdir()
+    photos = [file(f"Фото-{index}.jpg", f"photo-{index}".encode(), "image/jpeg") for index in range(10)]
+    await channel.on_frame({"type": "run", "rid": "11111111-1111-4111-8111-111111111111",
+                            "text": "Сравни", "attachments": photos})
+    assert len(channel.session.sent) == 1
+    content = channel.session.sent[0][1]["content"]
+    paths = [Path(json.loads(line.split(": ", 1)[1])) for line in content.splitlines()[-10:]]
+    assert [p.read_bytes() for p in paths] == [f"photo-{index}".encode() for index in range(10)]
+
+
 async def test_documents_and_photos_reach_the_session_as_existing_project_files(channel):
     channel.project.mkdir()
     await channel.on_frame(

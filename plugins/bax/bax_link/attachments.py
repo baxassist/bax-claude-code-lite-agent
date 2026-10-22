@@ -10,7 +10,7 @@ import re
 import tempfile
 from pathlib import Path
 
-MAX_FILES = 8
+MAX_FILES = 10
 MAX_FILE_BYTES = 6 * 1024 * 1024
 MAX_TOTAL_BYTES = 8 * 1024 * 1024
 
@@ -19,7 +19,7 @@ def prepare(project: Path, raw: object) -> str:
     if raw is None or raw == []:
         return ""
     if not isinstance(raw, list) or len(raw) > MAX_FILES:
-        raise ValueError("Можно прикрепить до 8 файлов")
+        raise ValueError("Можно прикрепить до 10 файлов")
     files, total = [], 0
     for item in raw:
         if not isinstance(item, dict):
