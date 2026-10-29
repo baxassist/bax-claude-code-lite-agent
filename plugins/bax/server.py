@@ -12,7 +12,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import logging
 import os
@@ -245,6 +244,9 @@ class Channel:
         #: карточки вопросов без ответа — чтобы показать заново, когда приложение откроют:
         #: вопрос мог прийти, пока оно было закрыто
         self.pending: dict[str, dict] = {}
+        # Accepted notifications may be acknowledged again without another MCP
+        # side effect. Unknown deliveries stay fenced while their question exists.
+        self.permission_results: dict[str, tuple[str, str]] = {}
         self.state = "ready"
         #: что дописано в файл сессии после истории — на телефон сразу, а не при новом открытии
         self.follower: history.Follower | None = None
@@ -402,13 +404,12 @@ class Channel:
     async def permission(self, request_id: str, behavior: str) -> None:
         session = self.session
         if session is None:
-            return
-        with contextlib.suppress(Exception):
-            with dependency("mcp", "notify"):
-                await session.notify(
-                    "notifications/claude/channel/permission",
-                    {"request_id": request_id, "behavior": behavior},
-                )
+            raise RuntimeError("Permission session is unavailable")
+        with dependency("mcp", "notify"):
+            await session.notify(
+                "notifications/claude/channel/permission",
+                {"request_id": request_id, "behavior": behavior},
+            )
 
     # --- кадры от приложения -------------------------------------------------
 
@@ -541,11 +542,47 @@ class Channel:
 
     async def answer(self, frame: dict) -> None:
         question_id = str(frame.get("question_id") or "")
-        request_id = self.questions.pop(question_id, "")
-        self.pending.pop(question_id, None)
+        verdict = frame.get("verdict")
+        fields = {"question_id": question_id, "rid": frame.get("rid"), "operation": "answer"}
+
+        async def unknown() -> None:
+            await self.send("error", **fields, code="external_outcome_unknown", delivery="unknown",
+                            message="Подтверждение разрешения не получено. Проверьте сессию Claude Code; "
+                                    "повторной отправки разрешения не будет.")
+
+        if verdict not in ("allow", "deny"):
+            return await self.send("error", **fields, code="validation_error", delivery="rejected",
+                                   message="Выберите разрешить или запретить.")
+        prior = self.permission_results.get(question_id)
+        if prior:
+            if prior[0] != verdict:
+                return await self.send("error", **fields, code="answer_conflict", delivery="rejected",
+                                       message="Для этого вопроса уже отправлен другой ответ.")
+            if prior[1] == "accepted":
+                return await self.send("question.resolved", question_id=question_id, delivery="accepted")
+            return await unknown()
+        request_id = self.questions.get(question_id, "")
         if not request_id:
-            return await self.send("error", code="not_found", message="Этот вопрос уже закрыт")
-        await self.permission(request_id, "allow" if frame.get("verdict") == "allow" else "deny")
+            return await self.send("error", **fields, code="not_found", delivery="rejected",
+                                   message="Этот вопрос уже закрыт")
+        if self.session is None:
+            return await self.send("error", **fields, code="agent_offline", delivery="rejected",
+                                   message="Сессия Claude Code закрылась. Проверьте разрешение в терминале.")
+        self.permission_results[question_id] = (verdict, "unknown")
+        try:
+            await self.permission(request_id, verdict)
+        except Exception as error:
+            logger.warning("permission notification unconfirmed: %s", type(error).__name__)
+            return await unknown()
+        self.permission_results[question_id] = (verdict, "accepted")
+        self.questions.pop(question_id, None)
+        self.pending.pop(question_id, None)
+        # Evict only accepted receipts: their question is gone, so an older replay
+        # is refused as closed. Unknown/in-flight answers must remain fenced.
+        accepted = [key for key, value in self.permission_results.items() if value[1] == "accepted"]
+        for key in accepted[:-256]:
+            self.permission_results.pop(key, None)
+        await self.send("question.resolved", question_id=question_id, delivery="accepted")
         await self.status("busy")
 
     # --- вопросы разрешений из сессии ---------------------------------------

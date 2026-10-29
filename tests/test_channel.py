@@ -863,3 +863,65 @@ async def test_notification_exception_keeps_unknown_outcome(channel):
     assert channel.link.of("error")[-1]["rid"] == request_id
     assert channel.link.of("error")[-1]["delivery"] == "unknown"
     assert not channel.link.of("message")
+
+
+@pytest.mark.parametrize('verdict', ['allow', 'deny'])
+async def test_permission_answer_has_receipt_and_retry_does_not_repeat_notification(channel, verdict):
+    await channel.ask('permission-receipt', 'Bash', 'Проверочная команда', 'echo test')
+    question_id = channel.link.of('question')[-1]['question_id']
+    answer = {'type': 'answer', 'question_id': question_id, 'verdict': verdict, 'rid': 'answer-1'}
+    await channel.on_frame(answer)
+    receipt = channel.link.of('question.resolved')[-1]
+    assert receipt['question_id'] == question_id and receipt['delivery'] == 'accepted'
+    await channel.on_frame({**answer, 'rid': 'answer-2'})
+    assert len(channel.session.sent) == 1
+    assert channel.link.of('question.resolved')[-1]['delivery'] == 'accepted'
+    assert question_id not in channel.pending and question_id not in channel.questions
+    await channel.on_frame({**answer, 'verdict': 'deny' if verdict == 'allow' else 'allow'})
+    assert channel.link.of('error')[-1]['code'] == 'answer_conflict'
+    assert len(channel.session.sent) == 1
+
+
+async def test_permission_lost_notification_receipt_never_resends_unknown_outcome(channel):
+    await channel.ask('permission-unknown', 'Bash', 'Не повторять неизвестный исход', 'echo test')
+    question_id = channel.link.of('question')[-1]['question_id']
+    attempts = []
+
+    async def lost(method, params):
+        attempts.append((method, params))
+        raise OSError('PRIVATE MCP TRANSPORT ERROR')
+
+    channel.session.notify = lost
+    answer = {'type': 'answer', 'question_id': question_id, 'verdict': 'allow', 'rid': 'answer-unknown'}
+    await channel.on_frame(answer)
+    await channel.on_frame(answer)
+    assert len(attempts) == 1
+    assert not channel.link.of('question.resolved')
+    assert channel.link.of('error')[-1]['delivery'] == 'unknown'
+    assert channel.link.of('error')[-1]['code'] == 'external_outcome_unknown'
+    assert 'PRIVATE' not in json.dumps(channel.link.frames)
+
+
+async def test_concurrent_permission_answers_notify_only_once(channel):
+    import asyncio
+
+    await channel.ask('permission-concurrent', 'Bash', 'Один ответ', 'echo test')
+    question_id = channel.link.of('question')[-1]['question_id']
+    started, release, attempts = asyncio.Event(), asyncio.Event(), []
+
+    async def slow(method, params):
+        attempts.append((method, params))
+        started.set()
+        await release.wait()
+
+    channel.session.notify = slow
+    answer = {'type': 'answer', 'question_id': question_id, 'verdict': 'allow'}
+    first = asyncio.create_task(channel.on_frame(answer))
+    await started.wait()
+    try:
+        await channel.on_frame(answer)
+        assert len(attempts) == 1
+    finally:
+        release.set()
+        await first
+    assert channel.link.of('question.resolved')[-1]['delivery'] == 'accepted'
