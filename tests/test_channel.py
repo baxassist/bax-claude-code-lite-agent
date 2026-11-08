@@ -300,6 +300,23 @@ async def test_failed_history_transfer_does_not_confirm_partial_page(channel, tr
     assert not channel.link.of("history.done")
 
 
+async def test_versioned_view_finishes_history_and_clears_answered_question(channel, transcript):
+    channel.pending["q"] = {"question_id": "q", "text": "Разрешить?", "kind": "permission"}
+    channel.state = "waiting"
+    await channel.on_frame({"type": "subscribe", "rid": "snapshot", "view_protocol": 1})
+    done, = channel.link.of("history.done")
+    view = done["view"]
+    assert view["question"]["question_id"] == "q"
+    assert view["state"] == "waiting" and "answer" in view["actions"]
+    assert done["history_rid"] == "snapshot"
+    initial = next(f for f in channel.link.of("session.view") if f.get("history_rid") == "snapshot")
+    assert initial["view"]["revision"] < view["revision"]
+    await channel.reply("Готово")
+    latest = channel.link.of("session.view")[-1]["view"]
+    assert latest["epoch"] == view["epoch"] and latest["revision"] > view["revision"]
+    assert latest["question"] is None and "answer" not in latest["actions"]
+
+
 async def test_live_messages_go_after_the_history(channel, transcript):
     """Живой ответ нумеруется после строк файла: приложение ставит его ниже истории."""
     await channel.reply("готово")

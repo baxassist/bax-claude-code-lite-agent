@@ -29,6 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bax_link import __version__, attachments, history  # noqa: E402
 from bax_link.connection import HandshakeError, Link  # noqa: E402
 from bax_link.mcp_stdio import StdioServer  # noqa: E402
+from bax_link.session_view import SessionView  # noqa: E402
 from bax_link.tracing import dependency  # noqa: E402
 
 logging.basicConfig(stream=sys.stderr, level=logging.INFO,
@@ -48,7 +49,7 @@ REPLY_TOOL = "mcp__plugin_bax_bax__reply"
 CAPS = {
     "mode": "lite",
     "supports": ["subscribe", "run", "answer", "history", "background.get", "background.stop",
-                 "attachments", "files.list", "files.read", "history.done"],
+                 "attachments", "files.list", "files.read", "history.done", "session.view"],
     "remember": False,
 }
 
@@ -63,7 +64,8 @@ FILES_CACHE_SECONDS = 20
 #: без флага канала уведомления отбрасывает («Channel notifications skipped»)
 READONLY_CAPS = {
     "mode": "lite",
-    "supports": ["subscribe", "history", "background.get", "files.list", "files.read", "history.done"],
+    "supports": ["subscribe", "history", "background.get", "files.list", "files.read",
+                 "history.done", "session.view"],
     "remember": False,
     "readonly": True,
 }
@@ -248,6 +250,7 @@ class Channel:
         # side effect. Unknown deliveries stay fenced while their question exists.
         self.permission_results: dict[str, tuple[str, str]] = {}
         self.state = "ready"
+        self.view = SessionView()
         #: что дописано в файл сессии после истории — на телефон сразу, а не при новом открытии
         self.follower: history.Follower | None = None
         #: разговор продолжен в другой сессии, агента отпустили — её id
@@ -262,8 +265,19 @@ class Channel:
     # --- наружу, в Бакс ------------------------------------------------------
 
     async def send(self, type_: str, **fields) -> None:
+        self.view.observe(type_, fields)
         if self.link is not None:
+            if self.view.enabled and type_ == "history.done":
+                fields["view"] = self.make_view(force=True)
             await self.link.send(type_, **fields)
+            if self.view.enabled and type_ != "history.done":
+                if snapshot := self.make_view():
+                    correlation = {"history_rid": fields["history_rid"]} if fields.get("history_rid") else {}
+                    await self.link.send("session.view", view=snapshot, **correlation)
+
+    def make_view(self, *, force=False):
+        return self.view.snapshot(state=self.state, question=next(iter(self.pending.values()), None),
+                                  supports=caps_of(self)["supports"], force=force)
 
     async def status(self, state: str) -> None:
         self.state = state
@@ -367,7 +381,8 @@ class Channel:
         tasks = self.follower.tasks.frame() if self.follower else []
         await self.send("background", tasks=tasks)
 
-    async def send_history(self, messages: list[history.Message], *, rid: str | None = None) -> None:
+    async def send_history(self, messages: list[history.Message], *, rid: str | None = None,
+                           complete: bool = True) -> None:
         # Корреляция только этой страницы: живые reply/follow её не наследуют.
         correlation = {"history_rid": rid} if rid else {}
         for message in messages:
@@ -375,7 +390,8 @@ class Channel:
             await self.send("message", id=message.id, kind=message.kind, text=message.text,
                             **extra, **correlation)
         # Пустая страница тоже закончена. При исключении середина не подтверждается.
-        await self.send("history.done", **correlation)
+        if complete:
+            await self.send("history.done", **correlation)
 
     async def reply(self, text: str) -> None:
         """Ответ модели — в приложение. Ход на этом заканчивается: вопросы этого хода решены
@@ -447,16 +463,23 @@ class Channel:
     async def on_frame(self, frame: dict) -> None:
         kind = frame.get("type")
         if kind == "subscribe":
+            self.view.enabled = self.view.enabled or frame.get("view_protocol") == 1
             # экран агента открыли: что умеем, история из файла сессии (там и задачи с
             # телефона, и то, что писали в терминале), вопросы без ответа и состояние
             await self.send("caps", **caps_of(self))
+            if self.view.enabled:
+                await self.link.send("session.view", view=self.make_view(force=True),
+                                     **({"history_rid": frame["rid"]} if frame.get("rid") else {}))
             # слежение — с того места, где кончилась история: без дыр и без повторов
             self.follower = self.fresh_follower()
-            await self.send_history(history.tail(self.transcript(), HISTORY_LIMIT), rid=frame.get("rid"))
+            await self.send_history(history.tail(self.transcript(), HISTORY_LIMIT),
+                                    rid=frame.get("rid"), complete=False)
             # разговор увели, пока за файлом никто не следил, — слежение с конца этого не увидит
             moved = history.handed_over(self.transcript())
             if moved:
-                return await self.release(moved)
+                await self.release(moved)
+                await self.send("history.done", **({"history_rid": frame["rid"]} if frame.get("rid") else {}))
+                return
             for card in self.pending.values():
                 await self.send("question", **card)
             await self.send_background()
@@ -464,6 +487,7 @@ class Channel:
             if turn and not (self.state == "waiting" and self.pending):
                 self.state = turn
             await self.status(self.state)
+            await self.send("history.done", **({"history_rid": frame["rid"]} if frame.get("rid") else {}))
         elif kind == "history":
             before = int(frame.get("before") or 0)
             limit = min(int(frame.get("limit") or HISTORY_LIMIT), 100)
