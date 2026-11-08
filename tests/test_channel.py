@@ -267,6 +267,39 @@ async def test_history_pages_back(channel, transcript):
     ]
 
 
+@pytest.mark.parametrize("command", [
+    {"type": "subscribe", "rid": "initial"},
+    {"type": "history", "before": 4, "limit": 2, "rid": "older"},
+    {"type": "history", "before": 0, "limit": 2, "rid": "empty"},
+])
+async def test_history_has_explicit_correlated_completion(channel, transcript, command):
+    await channel.on_frame(command)
+    frames = [f for f in channel.link.frames if f["type"] in {"message", "history.done"}]
+    assert frames[-1]["type"] == "history.done"
+    assert len(channel.link.of("history.done")) == 1
+    assert all(f["history_rid"] == command["rid"] for f in frames)
+    assert "history.done" in channel_module.CAPS["supports"]
+    assert "history.done" in channel_module.READONLY_CAPS["supports"]
+    # Живое сообщение после страницы не принадлежит старому запросу истории.
+    await channel.reply("Новый ответ")
+    assert "history_rid" not in channel.link.of("message")[-1]
+
+
+async def test_failed_history_transfer_does_not_confirm_partial_page(channel, transcript):
+    original = channel.link.send
+
+    async def fail_after_first(type_, **fields):
+        if type_ == "message" and channel.link.of("message"):
+            raise RuntimeError("synthetic interrupted history")
+        await original(type_, **fields)
+
+    channel.link.send = fail_after_first
+    with pytest.raises(RuntimeError, match="synthetic"):
+        await channel.on_frame({"type": "subscribe", "rid": "failed"})
+    assert channel.link.of("message")
+    assert not channel.link.of("history.done")
+
+
 async def test_live_messages_go_after_the_history(channel, transcript):
     """Живой ответ нумеруется после строк файла: приложение ставит его ниже истории."""
     await channel.reply("готово")

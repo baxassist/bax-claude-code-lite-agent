@@ -48,7 +48,7 @@ REPLY_TOOL = "mcp__plugin_bax_bax__reply"
 CAPS = {
     "mode": "lite",
     "supports": ["subscribe", "run", "answer", "history", "background.get", "background.stop",
-                 "attachments", "files.list", "files.read"],
+                 "attachments", "files.list", "files.read", "history.done"],
     "remember": False,
 }
 
@@ -63,7 +63,7 @@ FILES_CACHE_SECONDS = 20
 #: без флага канала уведомления отбрасывает («Channel notifications skipped»)
 READONLY_CAPS = {
     "mode": "lite",
-    "supports": ["subscribe", "history", "background.get", "files.list", "files.read"],
+    "supports": ["subscribe", "history", "background.get", "files.list", "files.read", "history.done"],
     "remember": False,
     "readonly": True,
 }
@@ -367,10 +367,15 @@ class Channel:
         tasks = self.follower.tasks.frame() if self.follower else []
         await self.send("background", tasks=tasks)
 
-    async def send_history(self, messages: list[history.Message]) -> None:
+    async def send_history(self, messages: list[history.Message], *, rid: str | None = None) -> None:
+        # Корреляция только этой страницы: живые reply/follow её не наследуют.
+        correlation = {"history_rid": rid} if rid else {}
         for message in messages:
             extra = {"count": message.count} if message.kind == "steps" else {}
-            await self.send("message", id=message.id, kind=message.kind, text=message.text, **extra)
+            await self.send("message", id=message.id, kind=message.kind, text=message.text,
+                            **extra, **correlation)
+        # Пустая страница тоже закончена. При исключении середина не подтверждается.
+        await self.send("history.done", **correlation)
 
     async def reply(self, text: str) -> None:
         """Ответ модели — в приложение. Ход на этом заканчивается: вопросы этого хода решены
@@ -447,7 +452,7 @@ class Channel:
             await self.send("caps", **caps_of(self))
             # слежение — с того места, где кончилась история: без дыр и без повторов
             self.follower = self.fresh_follower()
-            await self.send_history(history.tail(self.transcript(), HISTORY_LIMIT))
+            await self.send_history(history.tail(self.transcript(), HISTORY_LIMIT), rid=frame.get("rid"))
             # разговор увели, пока за файлом никто не следил, — слежение с конца этого не увидит
             moved = history.handed_over(self.transcript())
             if moved:
@@ -462,7 +467,7 @@ class Channel:
         elif kind == "history":
             before = int(frame.get("before") or 0)
             limit = min(int(frame.get("limit") or HISTORY_LIMIT), 100)
-            await self.send_history(history.before(self.transcript(), before, limit))
+            await self.send_history(history.before(self.transcript(), before, limit), rid=frame.get("rid"))
         elif kind == "files.list":
             await self.send_files()
         elif kind == "files.read":
